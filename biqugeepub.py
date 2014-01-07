@@ -107,7 +107,7 @@ class BiqugeEpub(object):
         if not book_info:
             return None 
         # open book site, get book info.
-        html=self.open_url(book_info['bookurl']).decode('gb18030').encode('utf-8')
+        html=self.open_url(book_info['bookurl']).decode('gbk').encode('utf-8')
         if len(html)>100:
             print "===Retrieving book information."
         subject=search('<a href="/[a-z]{4,10}xiaoshuo/">(.+?)小说</a>', html, U)
@@ -169,7 +169,7 @@ class BiqugeEpub(object):
             base_url='http://www.biquge.com/%(bookidf)s_%(bookid)s/content.html' % {'bookidf':self.book_id_f,'bookid':book_info['bookid']}
             
             for title in title_all[resume:]:
-                html=self.open_url(base_url.replace('content',title[0])).decode('gb18030').encode('utf-8')
+                html=self.open_url(base_url.replace('content',title[0])).decode('gbk').encode('utf-8')
                 content=search('<div id="content">(.+?)</div>',html,U|S)
                 
                 content=content.group(1).replace('\r\n','').replace(' ','').replace('&nbsp;','').replace("<br />","<br/>").replace("<br/><br/>","</p><p>")
