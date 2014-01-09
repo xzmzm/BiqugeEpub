@@ -110,7 +110,7 @@ class BiqugeEpub(object):
         html=self.open_url(book_info['bookurl']).decode('gbk').encode('utf-8')
         if len(html)>100:
             print "===Retrieving book information."
-        subject=search('<a href="/[a-z]{4,10}xiaoshuo/">(.+?)小说</a>', html, U)
+        subject=search('&gt; <a href="/[a-z]{4,10}xiaoshuo/">(.+?)小说</a>  &gt;', html, U)
         if subject:
             book_info['subject']=subject.group(1)
         print "Subject :", self.win_encode(book_info.get('subject'))
@@ -172,9 +172,13 @@ class BiqugeEpub(object):
                 html=self.open_url(base_url.replace('content',title[0])).decode('gbk').encode('utf-8')
                 content=search('<div id="content">(.+?)</div>',html,U|S)
                 
-                content=content.group(1).replace('\r\n','').replace(' ','').replace('&nbsp;','').replace("<br />","<br/>").replace("<br/><br/>","</p><p>")
-                if "href=http://" in content:
-                    content=sub("(href=)(http://.+?)([\\b|>])",lambda m: "".join([m.group(1),'"',m.group(2),'"',m.group(3)]),content)
+                content=content.group(1).replace('\r\n','').replace(' ','')\
+                                        .replace('&nbsp;','').replace("<br />","<br/>")
+                content=sub('&amp.*;','',content)
+                content=sub('(<|&lt;)a.+?(<|&lt;)/a(>|&gt;)','',content, U|S)
+                content=sub(u'(\(|（).*(\)|）)','',content, U|S)
+                content=sub('^(.*);$',lambda x:x.group(1),content, U|S)
+                content=content.replace("<br/><br/>","</p><p>")
                 content="".join(["<p>",content,"</p>"])
                 
                 write_content=temp_con.replace("{{title}}",title[1]).replace("{{content}}",content)
