@@ -14,7 +14,6 @@ from shutil import copytree, rmtree
 from zipfile import ZipFile, ZIP_DEFLATED
 import gzip
 import cStringIO
-import sys
 import logging
 
 
@@ -108,15 +107,13 @@ class BiqugeEpub(object):
             return win_str
 
     def generate_epub(self):
-        reload(sys)
-        sys.setdefaultencoding('utf-8') 
 
         book_info=self.query_book_info()
         if not book_info:
             return
         # open book site, get book info.
         html=self.open_url(book_info['bookurl'])
-        html = html.decode('gbk')
+        html = html.decode('gbk','ignore').encode('utf-8','ignore')
         if len(html)>100:
             print "===Retrieving book information."
         subject=search('&gt; <a href="/[a-z]{4,10}xiaoshuo/">(.+?)小说</a>  &gt;', html, U)
