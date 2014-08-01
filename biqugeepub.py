@@ -12,11 +12,10 @@ from os import name,chdir,walk,remove
 from os.path import join,exists
 from shutil import copytree, rmtree
 from zipfile import ZipFile, ZIP_DEFLATED
-from time import sleep
 import gzip
 import cStringIO
-import traceback
 import sys
+import logging
 
 
 class BiqugeEpub(object):
@@ -25,7 +24,7 @@ class BiqugeEpub(object):
         self.site = 'www.biquge.com'
         self.book_name = self.win_unencode(book_name)
         self.book_id = '0'
-        self.book_id_f='0'
+        self.book_id_f = '0'
     
     def open_url(self,url,TIMEOUT=60):
         """docstring for open_url"""
@@ -45,10 +44,10 @@ class BiqugeEpub(object):
                     html = gzip.GzipFile(fileobj = cStringIO.StringIO(html)).read()
                 return html
             else:
-                return None
-        except Exception, e:
-            print e
-            return None
+                return
+        except Exception as e:
+            logging.exception(e)
+            return
        
     def query_book_info(self):
         """docstring for query_book_id"""
@@ -64,7 +63,7 @@ class BiqugeEpub(object):
                 result=search(pattern,html)
                 if result:
                     return result
-            return None
+            return
                 
         book_link=query(base_query_url,baidu_pattern)
         if book_link is None:#用google再试一次。
@@ -95,7 +94,7 @@ class BiqugeEpub(object):
             return book_info
         else:        
             print "Could not find book information on biquge.com. Possible <biqugecom.com> has not included %s." % self.win_encode(self.book_name)
-            return None        
+            return        
 
     def win_encode(self,uni_str):
         if name is 'nt':
@@ -114,7 +113,7 @@ class BiqugeEpub(object):
 
         book_info=self.query_book_info()
         if not book_info:
-            return None 
+            return
         # open book site, get book info.
         html=self.open_url(book_info['bookurl'])
         html = html.decode('gbk')
@@ -162,7 +161,6 @@ class BiqugeEpub(object):
             else:
                 rmtree(self.book_id)
                 print "===Remove old files."
-                sleep(3)
         else:
             # copy template                    
             copytree('epub_template',self.book_id)
@@ -289,7 +287,6 @@ class BiqugeEpub(object):
             print "===Cleaned temp files."
             chdir("../.") 
             rmtree(self.book_id)
-            sleep(3)
             
             print '===Finish!'
             print "Epub file path is ./%s.epub." % self.win_encode(self.book_name)
@@ -299,6 +296,9 @@ class BiqugeEpub(object):
                 log.write(str(resume))
             
             print "Fail!"
+            print '\n======='
+            logging.exception(e)
+            print '=======\n'
             print "Test whether you can read this novel on <biqugecom.com> with your browser. If it's okay, you can re-run program again or feedback this issue to < https://github.com/hipro/BiqugeEpub >."
         #finally:
         #    return None
