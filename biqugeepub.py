@@ -13,6 +13,10 @@ from os.path import join,exists
 from shutil import copytree, rmtree
 from zipfile import ZipFile, ZIP_DEFLATED
 from time import sleep
+import gzip
+import cStringIO
+import traceback
+import sys
 
 
 class BiqugeEpub(object):
@@ -36,11 +40,14 @@ class BiqugeEpub(object):
             resp=urlopen(req,None,TIMEOUT)
             # status code 200 - 'ok'.
             if resp.code==200:
-                return resp.read()
+                html = resp.read()
+                if html[:6] == '\x1f\x8b\x08\x00\x00\x00':
+                    html = gzip.GzipFile(fileobj = cStringIO.StringIO(html)).read()
+                return html
             else:
                 return None
-        except Exception:
-            print 'Time out!'
+        except Exception, e:
+            print e
             return None
        
     def query_book_info(self):
@@ -102,12 +109,15 @@ class BiqugeEpub(object):
             return win_str
 
     def generate_epub(self):
-              
+        reload(sys)
+        sys.setdefaultencoding('utf-8') 
+
         book_info=self.query_book_info()
         if not book_info:
             return None 
         # open book site, get book info.
-        html=self.open_url(book_info['bookurl']).decode('gbk','ignore').encode('utf-8','ignore')
+        html=self.open_url(book_info['bookurl'])
+        html = html.decode('gbk')
         if len(html)>100:
             print "===Retrieving book information."
         subject=search('&gt; <a href="/[a-z]{4,10}xiaoshuo/">(.+?)小说</a>  &gt;', html, U)
@@ -130,6 +140,9 @@ class BiqugeEpub(object):
         datetime=search('<p>最后更新：(.+?)</p>', html)
         if datetime:
             book_info['datetime']=datetime.group(1).strip()
+        else:
+            book_info['datetime'] = ''
+        
         print "Last update :", book_info.get('datetime')
 
         title_all=findall('<a href="/[0-9]{1,2}_[0-9]{1,9}/([0-9]{1,9})\.html">(.+?)</a>', html, U)
