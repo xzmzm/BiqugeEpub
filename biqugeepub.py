@@ -46,6 +46,7 @@ class BiqugeEpub(object):
     @staticmethod
     def open_url(url, bytes_like=False):
         """获取页面内容"""
+        logging.info(url)
         headers = {
                 'Connection': 'keep-alive',
                 'Cache-Control': 'max-age=0',
@@ -97,7 +98,6 @@ class BiqugeEpub(object):
         def query(query_url):
             for key in ('最新章节', '全文阅读'):  # 精确匹配，防止下载错误小说。
                 url = ''.join([query_url, query_operator, quote(key)])
-                logger.info(url)
                 body = self.open_url(url)
                 result = re.search(site_pattern, body)
                 if result:
@@ -106,7 +106,7 @@ class BiqugeEpub(object):
         baidu_query_url = 'https://www.baidu.com/s?rn=5&wd='
         book_link = query(baidu_query_url)
         if book_link is None:  # 用google再试一次。
-            google_query_url = "https://www.google.com.hk/search?num=5&q="
+            google_query_url = "https://www.google.com/search?num=5&q="
             book_link = query(google_query_url)
 
         if book_link:
@@ -115,7 +115,7 @@ class BiqugeEpub(object):
             _book_url = book_link.group(0)
             book_info = {
                 'author': '',
-                'author_url': '',  # 'https://www.google.com.hk/search?num=1&q=%s'
+                'author_url': '',  # 'https://www.google.com/search?num=1&q=%s'
                 'book_id': self.book_id,
                 'book_name': self.book_name,
                 'book_url': _book_url if 'http://' in _book_url else "http://" + _book_url,
