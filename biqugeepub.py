@@ -98,6 +98,7 @@ class BiqugeEpub(object):
         def query(query_url):
             for key in ('最新章节', '全文阅读'):  # 精确匹配，防止下载错误小说。
                 url = ''.join([query_url, query_operator, quote(key)])
+                logging.info(url)
                 body = self.open_url(url)
                 result = re.search(site_pattern, body)
                 if result:
