@@ -7,13 +7,15 @@ __license__ = 'GPL'
 
 import gzip
 import logging
+import os
 import os.path
 import re
-import os
+import time
 
 from datetime import datetime
 from sys import argv, exit as esc
-from urllib.request import urlopen, Request
+from urllib.error import HTTPError
+from urllib.request import urlopen, Request, HTTPErrorProcessor
 from urllib.parse import quote
 from shutil import copytree, rmtree
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -44,7 +46,7 @@ class BiqugeEpub(object):
         self.book_id_f = '0'
 
     @staticmethod
-    def open_url(url, bytes_like=False):
+    def open_url(url, bytes_like=False, timeout=60):
         """获取页面内容"""
         logging.info(url)
         headers = {
@@ -74,9 +76,19 @@ class BiqugeEpub(object):
                                 '2429_32117_32091_26350_31639'
 
         req = Request(url, headers=headers)
+        resp = None
         body = ''
+        for _i in range(1, 6):
+            try:
+                resp = urlopen(req, None, timeout=timeout)
+            except HTTPError as _http_error:
+                logging.exception(_http_error)
+                time.sleep(_i*5)
+                continue
+            else:
+                break
+
         try:
-            resp = urlopen(req, None, timeout=60)
             if resp.code == 200:
                 body = resp.read()
                 if body[:6] == b'\x1f\x8b\x08\x00\x00\x00':  # gzip
@@ -233,7 +245,7 @@ class BiqugeEpub(object):
 
             for chapter in chapters[resume:]:
                 # http://www.biquge.info/77_77004/19481378.html
-                body = self.win_unencode(self.open_url(base_url.replace('content', chapter[0])))
+                body = self.win_unencode(self.open_url(base_url.replace('content', chapter[0]), timeout=5))
                 content = re.search('<div id="content">(.+?)</div>', body, re.U | re.S)
 
                 content = content.group(1). \
