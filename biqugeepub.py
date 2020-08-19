@@ -249,7 +249,8 @@ class BiqugeEpub(object):
                 content = re.search('<div id="content">(.+?)</div>', body, re.U | re.S)
 
                 content = content.group(1). \
-                    replace('\r\n', '').replace(' ', '').replace('&nbsp;', '').replace("<br />", "<br/>")
+                    replace('\r\n', '').replace(' ', '').replace('&nbsp;', '').replace("<br />", "<br/>").\
+                    replace('<!--go-->', '').replace("<!--over-->", "")
                 content = re.sub('&amp.*;', '', content)
                 content = re.sub('(<|&lt;)a.+?(<|&lt;)/a(>|&gt;)', '', content, re.U | re.S)
                 content = re.sub(r'(\(|（).*(\)|）)', '', content, re.U | re.S)
