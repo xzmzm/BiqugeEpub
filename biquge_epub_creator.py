@@ -7,7 +7,7 @@ import re
 import os
 import logging
 import mimetypes # Added for guessing image type
-
+import sys # For exit
 # --- Configuration ---
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,6 +26,104 @@ HEADERS = {
 }
 MAX_RETRIES = 3
 
+# --- Site Configuration ---
+SITE_CONFIGS = {
+    "bqg5.com": {
+        "base_url": "https://www.bqg5.com",
+        "encoding": "gb18030", # Hint for fallback
+        "metadata_selectors": {
+            "title_meta": ('meta', {'property': 'og:title'}),
+            "title_fallback": 'h1',
+            "author_meta": ('meta', {'property': 'og:novel:author'}),
+            "author_fallback_p_text": '作\xa0\xa0\xa0\xa0者：', # Non-breaking spaces
+            "status_meta": ('meta', {'property': 'og:novel:status'}),
+            "description_meta": ('meta', {'property': 'og:description'}),
+            "cover_meta": ('meta', {'property': 'og:image'}),
+            "cover_fallback": '#fmimg img',
+            "info_div": ('div', {'id': 'info'}),
+        },
+        "chapter_list_selectors": {
+            "container": ('div', {'id': 'list'}),
+            "container_fallback": 'dl',
+            "link_selector": 'a',
+            "skip_dt_count": 2, # Skip links before the second <dt>
+            "link_area_selector": 'dd a', # Links are within <dd><a> after the target <dt>
+        },
+        "chapter_content_selectors": {
+            "container": [('div', {'id': 'content'}), ('div', {'class_': 'content'}), ('div', {'id': 'booktxt'})], # List of selectors to try
+        },
+        "ads_patterns": [
+            r'天才一秒记住本站地址.*',
+            r'手机版阅读网址.*',
+            r'bqg\d*\.(com|cc|net)',
+            r'请记住本书首发域名.*',
+            r'最新网址.*',
+            r'\(.*?\)', # Maybe too broad? Keep for now.
+        ],
+        "needs_metadata_fetch": False, # Metadata and chapters on same page
+    },
+    "69shuba.com": {
+        "base_url": "https://www.69shuba.com",
+        "encoding": "utf-8", # Hint
+        "metadata_url_template": "{base_url}/book/{book_id}.htm", # Template to get metadata page
+        "metadata_selectors": {
+            # Selectors based on inspecting www.69shuba.com/book/85122.htm
+            "title_fallback": '.booknav h1', # Title is in h1 inside div.booknav
+            "author_fallback_p_text": '作者：', # Standard colon, found in p tag
+            "status_meta": None, # No obvious status meta tag found
+            "description_fallback": '.intro', # Description is in div.intro
+            "cover_fallback": '.bookimg img', # Cover is in div.bookimg img
+            "info_div": ('div', {'class': 'booknav'}), # Container for author etc.
+            # No obvious meta tags found for these on .htm page
+            "title_meta": None,
+            "author_meta": None,
+            "description_meta": None,
+            "cover_meta": None,
+        },
+        "chapter_list_selectors": {
+            # Selectors based on inspecting www.69shuba.com/book/85122/
+            "container": ('div', {'class': 'catalog', 'id': 'catalog'}), # Chapters are in div.catalog#catalog -> ul
+            "link_selector": 'ul li a', # Links are <a> within <li> within <ul>
+            "skip_dt_count": 0, # No complex skipping needed
+            "link_area_selector": 'ul li a', # Direct selection
+        },
+        "chapter_content_selectors": {
+            # Selector based on inspecting www.69shuba.com/txt/85122/39443178
+            "container": [('div', {'class': 'txtnav'})], # Content seems to be in div.txtnav
+        },
+        "ads_patterns": [
+             # Add patterns specific to 69shuba if found during testing
+             r'www\.69shuba\.com', # Example: remove site name mentions
+             r'69书吧', # Example: remove site name mentions
+             r'https://www\.69shuba\.com', # Remove full links
+             r'小提示：.*', # Remove footer hint
+             r'章节错误？点此举报', # Remove error link text
+             r'Copyright \d+ 69书吧', # Remove copyright
+        ],
+        "needs_metadata_fetch": True, # Metadata is on .htm page, chapters on / page
+    }
+}
+
+def get_site_config(url):
+    """Determines the site config based on the URL."""
+    for domain, config in SITE_CONFIGS.items():
+        # Check if the domain is present in the URL's netloc
+        try:
+            parsed_url = requests.utils.urlparse(url)
+            if domain in parsed_url.netloc:
+                logging.info(f"Detected site: {domain}")
+                return config
+        except Exception as e:
+            logging.warning(f"URL parsing failed for {url}: {e}. Trying simple string search.")
+            # Fallback to simple string search if parsing fails
+            if domain in url:
+                logging.info(f"Detected site (fallback): {domain}")
+                return config
+
+    logging.warning(f"Could not determine site configuration for URL: {url}. No supported domain found.")
+    return None # Return None if no config found
+
+# --- Helper Functions ---
 # --- Helper Functions ---
 
 def fetch_url(url):
@@ -59,18 +157,32 @@ def fetch_url(url):
     logging.error(f"Failed to fetch {url} after {MAX_RETRIES} retries.")
     return None
 
-def clean_html_content(html_content):
+def clean_html_content(content_container_tag, site_config): # Changed parameter, added site_config
     """Removes unwanted tags and cleans up chapter text for EPUB HTML."""
-    # Remove script and style elements
-    for script in html_content(["script", "style", "ins", "div"]): # Remove divs as well, assuming content is directly in #content
-        script.extract()
+    if not content_container_tag:
+        return ""
+
+    # Work on a copy to avoid modifying the original soup object
+    # Use html.parser for consistency
+    tag_copy = BeautifulSoup(str(content_container_tag), 'html.parser').find(content_container_tag.name, recursive=False, attrs=content_container_tag.attrs)
+    # Handle case where find returns None
+    if not tag_copy:
+        logging.warning("Failed to parse content container tag copy.")
+        # Fallback to using the original tag, but this might modify the main soup
+        tag_copy = content_container_tag
+
+    # Remove script and style elements *within the container*
+    # Line 65 (remove div) is REMOVED. Keep other unwanted tags.
+    for script in tag_copy(["script", "style", "ins", "a"]): # Also remove links within content
+        if script: # Check if tag exists before extracting
+            script.extract()
 
     # Convert <br> tags to newlines first
-    for br in html_content.find_all("br"):
+    for br in tag_copy.find_all("br"):
         br.replace_with("\n")
 
     # Get text content, preserving line breaks from converted <br> tags
-    text = html_content.get_text(separator='\n')
+    text = tag_copy.get_text(separator='\n')
 
     # Clean whitespace and specific patterns
     lines = text.splitlines()
@@ -80,15 +192,29 @@ def clean_html_content(html_content):
         # Replace common placeholders/ads specific to the site
         cleaned_line = cleaned_line.replace('    ', '') # Remove specific space sequence often used for indentation
         cleaned_line = cleaned_line.replace(' ', ' ') # Replace non-breaking space
-        # Remove potential leftover promotional text (adjust regex as needed)
-        cleaned_line = re.sub(r'天才一秒记住本站地址.*', '', cleaned_line, flags=re.IGNORECASE)
-        cleaned_line = re.sub(r'手机版阅读网址.*', '', cleaned_line, flags=re.IGNORECASE)
-        cleaned_line = re.sub(r'bqg\d*\.(com|cc|net)', '', cleaned_line, flags=re.IGNORECASE) # Remove site name mentions
-        cleaned_line = re.sub(r'请记住本书首发域名.*', '', cleaned_line, flags=re.IGNORECASE)
-        cleaned_line = re.sub(r'最新网址.*', '', cleaned_line, flags=re.IGNORECASE)
-        cleaned_line = re.sub(r'\(.*?\)', '', cleaned_line) # Remove text in parentheses often used for ads/notes
+        cleaned_line = cleaned_line.replace(' ', ' ') # Replace full-width space (added)
+
+        # Remove potential leftover promotional text using patterns from site_config
+        ad_patterns = site_config.get('ads_patterns', [])
+        for pattern in ad_patterns:
+            try:
+                cleaned_line = re.sub(pattern, '', cleaned_line, flags=re.IGNORECASE)
+            except re.error as e:
+                logging.warning(f"Invalid regex pattern in site config: {pattern} - {e}")
+
+        # General cleanup (remove multiple spaces)
+        cleaned_line = re.sub(r'\s{2,}', ' ', cleaned_line).strip()
 
         if cleaned_line: # Only keep non-empty lines
+            # Specific check for 69shuba chapter title repetition / author line
+            # Make this check more robust or part of config if needed
+            if "作者：" in cleaned_line and len(cleaned_lines) > 0 and "69shuba.com" in site_config["base_url"]:
+                 continue
+            # Check if it looks like a chapter title and it's the first line
+            is_chapter_title_line = (cleaned_line.startswith("第") and ("章 " in cleaned_line or "回 " in cleaned_line))
+            if is_chapter_title_line and len(cleaned_lines) == 0:
+                 continue
+
             cleaned_lines.append(cleaned_line)
 
     # Format as simple HTML paragraphs
@@ -98,39 +224,98 @@ def clean_html_content(html_content):
 
 # --- Main Logic ---
 
-def get_book_details(index_html, book_url):
-    """Extracts book title, author, description, and cover image URL from the index page."""
-    soup = BeautifulSoup(index_html, 'html.parser')
-    # Try multiple selectors for title and author as site structure might vary
-    title_tag = soup.find('meta', property='og:title') or soup.find('h1')
-    author_tag = soup.find('meta', property='og:novel:author')
-    status_tag = soup.find('meta', property='og:novel:status')
-    description_tag = soup.find('meta', property='og:description')
-    # Prioritize og:image meta tag, fall back to #fmimg selector
-    og_image_tag = soup.find('meta', property='og:image')
-    if og_image_tag and og_image_tag.get('content'):
-        cover_image_tag = og_image_tag # Use the meta tag directly
-        cover_image_src = og_image_tag['content']
-    else:
-        # Fallback to the visual image selector if meta tag not found/empty
-        cover_image_tag = soup.select_one('#fmimg img')
-        cover_image_src = cover_image_tag['src'] if cover_image_tag else None
+def get_book_details(html_content, book_url, site_config): # Added site_config, changed html source name
+    """Extracts book title, author, description, and cover image URL from the relevant page."""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    selectors = site_config['metadata_selectors']
 
-    title = title_tag['content'].strip() if title_tag and title_tag.has_attr('content') else (title_tag.text.strip() if title_tag else "Unknown Title")
-    author = author_tag['content'].strip() if author_tag else "Unknown Author"
-    status = status_tag['content'].strip() if status_tag else "Unknown Status"
-    description = description_tag['content'].strip() if description_tag else "No description available."
-    cover_image_url = requests.compat.urljoin(book_url, cover_image_src) if cover_image_src else None
+    # Helper to find element using config
+    def find_element(selector_key, soup_obj=soup):
+        selector = selectors.get(selector_key)
+        if not selector: return None
+        # Handle different selector types robustly
+        try:
+            if isinstance(selector, str): # Simple CSS selector
+                return soup_obj.select_one(selector)
+            elif isinstance(selector, tuple) and len(selector) == 2 and isinstance(selector[1], dict): # (tag_name, {attrs})
+                return soup_obj.find(selector[0], selector[1])
+            elif isinstance(selector, tuple) and len(selector) == 1: # Assume (tag_name,)
+                return soup_obj.find(selector[0])
+        except Exception as e:
+            logging.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
+        return None
 
-    # Refine author extraction if needed (sometimes it's in a <p> tag)
-    if author == "Unknown Author":
-        info_div = soup.find('div', id='info')
-        if info_div:
-            p_tags = info_div.find_all('p')
-            for p in p_tags:
-                 if '作    者：' in p.text: # Check for Chinese label "作者："
-                     author = p.text.replace('作    者：', '').strip()
-                     break
+    # Helper to get content/text
+    def get_content(tag, attr='content'):
+        if not tag: return None
+        try:
+            if attr and tag.has_attr(attr): return tag[attr].strip()
+            return tag.text.strip()
+        except Exception as e:
+            logging.warning(f"Error getting content/attribute '{attr}' from tag {tag}: {e}")
+        return None
+    # Title
+    title = get_content(find_element('title_meta')) or get_content(find_element('title_fallback'), attr=None) or "Unknown Title"
+
+    # Author
+    author = get_content(find_element('author_meta'))
+    # Fallback using text label search within info container
+    if not author or author == "Unknown Author":
+         info_container = find_element('info_div') # Find the container for author info
+         if info_container:
+             # Search within all text nodes or specific tags like <p>
+             p_tags = info_container.find_all('p') # Common place for author info
+             author_label = selectors.get('author_fallback_p_text', '作者：') # Get site-specific label
+             found = False
+             for p in p_tags:
+                  if author_label in p.text:
+                      author = p.text.replace(author_label, '').strip()
+                      # Handle cases where author might be a link inside the p tag
+                      if not author and p.find('a'):
+                          author = p.find('a').text.strip()
+                      found = True
+                      break
+             # If not found in <p>, try searching all text in the container
+             if not found:
+                 container_text = info_container.get_text(" ", strip=True)
+                 match = re.search(re.escape(author_label) + r'\s*([^\s]+)', container_text)
+                 if match:
+                     author = match.group(1).strip()
+
+    author = author or "Unknown Author"
+
+    # Status
+    status = get_content(find_element('status_meta')) or "Unknown Status" # Add fallback if needed
+
+    # Description
+    description = get_content(find_element('description_meta')) or get_content(find_element('description_fallback'), attr=None) or "No description available."
+    # Clean up description if needed (e.g., remove "简介：")
+    description = description.replace('简介：', '').strip()
+    # Limit description length?
+    # description = description[:500] + '...' if len(description) > 503 else description
+
+    # Cover Image
+    cover_image_src = get_content(find_element('cover_meta'))
+    if not cover_image_src:
+        cover_image_tag = find_element('cover_fallback')
+        cover_image_src = get_content(cover_image_tag, attr='src')
+
+    # Ensure cover URL is absolute
+    cover_image_url = None
+    if cover_image_src:
+        # Sometimes src might be relative to base_url, sometimes to book_url
+        # Try joining with book_url first, then base_url as fallback
+        cover_image_url = requests.compat.urljoin(book_url, cover_image_src)
+        # Basic check if URL looks valid (starts with http)
+        if not cover_image_url.startswith('http'):
+             base_site_url = site_config.get("base_url", book_url)
+             cover_image_url = requests.compat.urljoin(base_site_url, cover_image_src)
+        # If still not valid, set to None
+        if not cover_image_url.startswith('http'):
+             logging.warning(f"Could not construct absolute cover URL from src: {cover_image_src}")
+             cover_image_url = None
+
+    # Author fallback logic moved up
 
     logging.info(f"Title: {title}")
     logging.info(f"Author: {author}")
@@ -139,48 +324,102 @@ def get_book_details(index_html, book_url):
     logging.info(f"Cover Image URL: {cover_image_url}")
     return title, author, description, cover_image_url
 
-def get_chapter_links(index_html, book_url):
+def get_chapter_links(index_html, book_url, site_config): # Added site_config
     """Extracts chapter links and titles from the index page."""
     soup = BeautifulSoup(index_html, 'html.parser')
     chapters = []
-    # Find the chapter list container (adjust selector based on website structure)
-    chapter_list_container = soup.find('div', id='list') or soup.find('dl') # Try dl as fallback
+    selectors = site_config['chapter_list_selectors']
+
+    # Helper to find element using config (can be reused or defined locally)
+    def find_element(selector_key, soup_obj=soup):
+        selector = selectors.get(selector_key)
+        if not selector: return None
+        try:
+            if isinstance(selector, str): return soup_obj.select_one(selector)
+            elif isinstance(selector, tuple): return soup_obj.find(selector[0], selector[1])
+        except Exception as e:
+            logging.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
+        return None
+
+    # Find the chapter list container
+    container_selector = selectors.get('container')
+    container_fallback_selector = selectors.get('container_fallback')
+    chapter_list_container = find_element('container') or find_element('container_fallback')
+
     if not chapter_list_container:
-        logging.error("Could not find chapter list container ('div#list' or 'dl').")
+        logging.error(f"Could not find chapter list container using selectors: {container_selector}, {container_fallback_selector}.")
         return []
 
-    links = chapter_list_container.find_all('a')
-    seen_urls = set() # Avoid duplicate chapters if links appear multiple times
-    for link in links:
+    # --- Select Links based on Config ---
+    links_elements = []
+    skip_dt_count = selectors.get('skip_dt_count', 0)
+    link_selector = selectors.get('link_selector', 'a') # Default to 'a'
+
+    if skip_dt_count > 0:
+        # Logic for sites like bqg5 that need skipping based on <dt>
+        dt_elements = chapter_list_container.find_all('dt')
+        if len(dt_elements) >= skip_dt_count:
+            target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
+            chapter_links_siblings = target_dt.find_next_siblings()
+            link_area_selector = selectors.get('link_area_selector', 'a') # e.g., 'dd a'
+            # Determine the tag name to check for siblings (e.g., 'dd' from 'dd a')
+            sibling_tag_name = link_area_selector.split()[0] if ' ' in link_area_selector else 'a'
+
+            for element in chapter_links_siblings:
+                 # Check if the element is a Tag and matches the expected sibling type
+                 if hasattr(element, 'name') and element.name == sibling_tag_name:
+                     # Find the link within the sibling element using the full selector part
+                     link = element.select_one(link_area_selector) if ' ' in link_area_selector else (element if element.name == 'a' else None)
+                     if link:
+                         links_elements.append(link)
+        else:
+             # Fallback to selecting all links if dt structure not found as expected
+             logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links.")
+             links_elements = chapter_list_container.select(link_selector)
+    else:
+        # Simpler logic for sites like 69shuba (or fallback)
+        links_elements = chapter_list_container.select(link_selector)
+
+    # --- Process Selected Links ---
+    seen_urls = set() # Avoid duplicate chapters
+    base_site_url = site_config.get("base_url", book_url) # Use for joining relative URLs
+
+    for link in links_elements:
         href = link.get('href')
         title = link.text.strip()
-        if href and title and not href.startswith(('javascript:', '#')):
+
+        # Basic filtering for valid chapter links
+        if href and title and not href.startswith(('javascript:', '#')) and len(title) > 0:
             # Construct absolute URL if relative
-            full_url = requests.compat.urljoin(book_url, href)
-            if full_url not in seen_urls:
+            # Important: Join with the base site URL, not necessarily the index page URL
+            full_url = requests.compat.urljoin(base_site_url, href)
+
+            # Additional filter: check if URL path looks like a chapter
+            # Make heuristic more robust: allow different patterns
+            is_likely_chapter = False
+            try:
+                path = requests.utils.urlparse(full_url).path
+                # Common patterns: /book_id/chapter_id.html, /txt/book_id/chapter_id, /read/book_id/chapter_id/, /digits/digits.html etc.
+                if re.search(r'/\d+/\d+(?:\.html)?$', path) or \
+                   re.search(r'/txt/\d+/\d+', path) or \
+                   re.search(r'/read/\d+/\d+', path) or \
+                   re.search(r'/\d+_\d+(?:\.html)?$', path):
+                    is_likely_chapter = True
+            except Exception:
+                pass # Ignore URL parsing errors for filtering
+
+            # Filter out known non-chapter links (e.g., '/info/', '/reviews/')
+            if '/comm/' in full_url or '/info/' in full_url or '/review' in full_url:
+                is_likely_chapter = False
+
+            if is_likely_chapter and full_url not in seen_urls:
+                # Simple title cleaning (remove potential artifacts)
+                title = re.sub(r'^（\d+）', '', title).strip() # Remove leading (number) if present
+                # Remove common prefixes/suffixes if needed
+                # title = title.replace('最新章节 ', '')
+
                 chapters.append({'title': title, 'url': full_url})
                 seen_urls.add(full_url)
-
-    # Often the first few links are not chapters, but the latest ones.
-    # Heuristic: Find the first link that looks like a real chapter (e.g., contains '第...章')
-    # Or assume the list starts after a certain element like <dt>
-    dt_elements = chapter_list_container.find_all('dt')
-    if len(dt_elements) > 1: # Check if there are multiple <dt> sections
-        # Assume chapters start after the second <dt> which often labels the main list
-        chapter_links_element = dt_elements[1].find_next_siblings()
-        chapters = [] # Reset chapters and rebuild from the correct section
-        seen_urls = set()
-        for element in chapter_links_element:
-            if element.name == 'dd':
-                link = element.find('a')
-                if link:
-                    href = link.get('href')
-                    title = link.text.strip()
-                    if href and title and not href.startswith(('javascript:', '#')):
-                        full_url = requests.compat.urljoin(book_url, href)
-                        if full_url not in seen_urls:
-                            chapters.append({'title': title, 'url': full_url})
-                            seen_urls.add(full_url)
 
     logging.info(f"Found {len(chapters)} potential chapter links.")
     return chapters
@@ -383,21 +622,84 @@ p {
 # --- Main Execution ---
 if __name__ == "__main__":
     import argparse
+    # import sys # Already imported at top
 
-    parser = argparse.ArgumentParser(description='Download chapters from a bqg5.com book index page and create an EPUB.')
-    parser.add_argument('url', nargs='?', default=DEFAULT_BOOK_INDEX_URL,
-                        help=f'The URL of the book index page (e.g., {DEFAULT_BOOK_INDEX_URL})')
+    parser = argparse.ArgumentParser(description='Download chapters from bqg5.com or 69shuba.com book index page and create an EPUB.')
+    # Changed default to None, make URL required, removed nargs='?'
+    parser.add_argument('url', help='The URL of the book index page (e.g., https://www.bqg5.com/0_521/ or https://www.69shuba.com/book/85122/)')
     args = parser.parse_args()
-    book_index_url = args.url
+    # Clean up URL slightly (remove trailing slash, whitespace)
+    book_index_url = args.url.strip().rstrip('/')
+
+    # --- Site Detection and Config ---
+    site_config = get_site_config(book_index_url)
+    if not site_config:
+         logging.error(f"Unsupported website URL provided: {book_index_url}")
+         sys.exit(1) # Exit if site is not supported
 
     logging.info(f"Starting EPUB creation for: {book_index_url}")
-    logging.info(f"Fetching book index: {book_index_url}")
-    index_html = fetch_url(book_index_url)
+    logging.info(f"Using config for: {site_config['base_url']}")
 
-    if index_html:
-        book_title, book_author, book_description, cover_url = get_book_details(index_html, book_index_url)
+    # --- Fetch Initial Pages ---
+    index_html = None # Page with chapter links
+    metadata_html = None # Page with book metadata (title, author, etc.)
+    metadata_url = book_index_url # Default: metadata on index page
 
-        chapter_links = get_chapter_links(index_html, book_index_url)
+    if site_config.get('needs_metadata_fetch', False):
+        # Derive metadata URL (e.g., .htm page for 69shuba)
+        try:
+            # Extract book ID for template (e.g., 85122 from https://www.69shuba.com/book/85122/)
+            # Make regex more general if needed
+            book_id_match = re.search(r'/(?:book|txt|info)/(\d+)', book_index_url)
+            if not book_id_match:
+                # Try extracting last digits if pattern fails
+                book_id_match = re.search(r'/(\d+)/?$', book_index_url.split('/')[-1] if book_index_url.endswith('/') else book_index_url)
+                if not book_id_match:
+                     # Try extracting digits after _
+                     book_id_match = re.search(r'_(\d+)', book_index_url)
+
+            if not book_id_match:
+                raise ValueError("Could not extract book ID from URL for metadata lookup")
+
+            book_id = book_id_match.group(1)
+            metadata_url_template = site_config.get('metadata_url_template')
+            if not metadata_url_template:
+                 raise ValueError("Missing 'metadata_url_template' in site config")
+
+            metadata_url = metadata_url_template.format(base_url=site_config['base_url'], book_id=book_id)
+            logging.info(f"Fetching metadata page: {metadata_url}")
+            metadata_html = fetch_url(metadata_url)
+            if not metadata_html:
+                 raise ConnectionError(f"Failed to fetch metadata page: {metadata_url}")
+
+            # Fetch the index page (chapter list) separately using the original URL
+            # Ensure trailing slash for sites like 69shuba chapter list
+            chapter_list_fetch_url = book_index_url
+            if not chapter_list_fetch_url.endswith('/'):
+                chapter_list_fetch_url += '/'
+            logging.info(f"Fetching chapter list page: {chapter_list_fetch_url}")
+            index_html = fetch_url(chapter_list_fetch_url)
+            if not index_html:
+                 raise ConnectionError(f"Failed to fetch chapter list page: {chapter_list_fetch_url}")
+
+        except (ValueError, ConnectionError, KeyError, AttributeError) as e:
+             logging.error(f"Error preparing URLs or fetching initial pages for {site_config['base_url']}: {e}")
+             metadata_html = None # Ensure it's None if fetch failed
+             index_html = None
+    else:
+        # For sites like bqg5, metadata and chapters are on the same page
+        logging.info(f"Fetching book index/metadata page: {book_index_url}")
+        index_html = fetch_url(book_index_url)
+        metadata_html = index_html # Use the same HTML for both
+        metadata_url = book_index_url # URL where metadata was found
+
+    # --- Process Data ---
+    if index_html and metadata_html:
+        # Use metadata_html for details, index_html for chapters
+        # Pass metadata_url for resolving relative cover images if needed
+        book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config)
+
+        chapter_links = get_chapter_links(index_html, book_index_url, site_config)
 
         if chapter_links:
             chapters_content_data = []
@@ -409,13 +711,26 @@ if __name__ == "__main__":
                 chapter_html_page = fetch_url(chapter_info['url'])
                 if chapter_html_page:
                     soup = BeautifulSoup(chapter_html_page, 'html.parser')
-                    # Find the main content div (adjust selector based on website structure)
-                    # Common selectors: #content, .content, #booktxt, .read-content
-                    content_div = soup.find('div', id='content') or soup.find('div', class_='content') or soup.find('div', id='booktxt')
+                    # Find the main content div using selectors from config
+                    content_div = None
+                    content_selectors = site_config.get('chapter_content_selectors', {}).get('container', [])
+                    for selector_info in content_selectors:
+                         try:
+                             if isinstance(selector_info, tuple) and len(selector_info) == 2:
+                                  content_div = soup.find(selector_info[0], selector_info[1])
+                             elif isinstance(selector_info, str): # Simple CSS selector
+                                  content_div = soup.select_one(selector_info)
+                             if content_div:
+                                 logging.debug(f"Found content container using: {selector_info}")
+                                 break # Found it
+                         except Exception as e:
+                             logging.warning(f"Error applying content selector {selector_info}: {e}")
+                             continue # Try next selector
 
                     if content_div:
-                        # Clean the content before adding
-                        cleaned_content_html = clean_html_content(content_div)
+                        # Clean the content *container* before adding
+                        # Pass site_config to cleaning function for site-specific rules
+                        cleaned_content_html = clean_html_content(content_div, site_config) # Pass the tag object and config
                         if cleaned_content_html: # Ensure content was actually extracted
                             chapters_content_data.append({
                                 'title': chapter_info['title'],
@@ -424,18 +739,19 @@ if __name__ == "__main__":
                         else:
                             logging.warning(f"Content div found but no text extracted for chapter: {chapter_info['title']}")
                     else:
-                        logging.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']}")
+                        logging.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']} using selectors {content_selectors}")
                 else:
                     logging.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
 
             if chapters_content_data:
                 logging.info(f"\nCollected content for {len(chapters_content_data)} chapters. Creating EPUB...")
+                # Pass the original book_index_url as the source URL for metadata
                 create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url)
             else:
                 logging.error("No chapter content collected. EPUB creation aborted.")
         else:
             logging.error("No chapter links found. Aborting.")
     else:
-        logging.error("Failed to fetch book index. Aborting.")
+        logging.error("Failed to fetch book index and/or metadata page(s). Aborting.")
 
     logging.info("Script finished.")
