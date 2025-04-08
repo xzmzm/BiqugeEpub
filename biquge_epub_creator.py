@@ -106,14 +106,21 @@ def get_book_details(index_html, book_url):
     author_tag = soup.find('meta', property='og:novel:author')
     status_tag = soup.find('meta', property='og:novel:status')
     description_tag = soup.find('meta', property='og:description')
-    cover_image_tag = soup.select_one('#fmimg img') # Selector for the cover image
-    # cover_image_tag = soup.find('meta', property='og:image') # Alternative if the site uses og:image
+    # Prioritize og:image meta tag, fall back to #fmimg selector
+    og_image_tag = soup.find('meta', property='og:image')
+    if og_image_tag and og_image_tag.get('content'):
+        cover_image_tag = og_image_tag # Use the meta tag directly
+        cover_image_src = og_image_tag['content']
+    else:
+        # Fallback to the visual image selector if meta tag not found/empty
+        cover_image_tag = soup.select_one('#fmimg img')
+        cover_image_src = cover_image_tag['src'] if cover_image_tag else None
 
     title = title_tag['content'].strip() if title_tag and title_tag.has_attr('content') else (title_tag.text.strip() if title_tag else "Unknown Title")
     author = author_tag['content'].strip() if author_tag else "Unknown Author"
     status = status_tag['content'].strip() if status_tag else "Unknown Status"
     description = description_tag['content'].strip() if description_tag else "No description available."
-    cover_image_url = requests.compat.urljoin(book_url, cover_image_tag['src']) if cover_image_tag and cover_image_tag.get('src') else None
+    cover_image_url = requests.compat.urljoin(book_url, cover_image_src) if cover_image_src else None
 
     # Refine author extraction if needed (sometimes it's in a <p> tag)
     if author == "Unknown Author":
