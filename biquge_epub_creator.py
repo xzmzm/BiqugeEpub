@@ -102,6 +102,42 @@ SITE_CONFIGS = {
         ],
         "needs_metadata_fetch": True, # Metadata is on .htm page, chapters on / page
     }
+},
+"dxmwx.org": {
+    "base_url": "https://www.dxmwx.org",
+    "encoding": "utf-8", # Hint
+    "metadata_selectors": {
+        # Selectors based on inspecting https://www.dxmwx.org/chapter/57132.html
+        "title_fallback": "div[style*='font-size: 26px']", # Title is in a styled div
+        "author_fallback_p_text": '作者：', # Standard colon, but author is in a link
+        "author_link_selector": "a[href='#']", # Specific selector for the author link within the author text block
+        "status_meta": None, # No obvious status
+        "description_meta": ('meta', {'name': 'description'}), # Description is in meta tag
+        "cover_fallback": None, # No cover image observed on index page
+        "info_div": ('div', {'style': 'line-height: 32px; font-size: 12px; color: #999; margin-bottom: 20px; text-align: center;'}), # Container for author etc.
+        "title_meta": None,
+        "author_meta": None,
+        "cover_meta": None,
+    },
+    "chapter_list_selectors": {
+        # Selectors based on inspecting https://www.dxmwx.org/chapter/57132.html
+        # Chapters are in multiple divs, need to select all relevant links
+        "container": None, # No single container, select links directly from body/main area
+        "link_selector": "div[style*='height:40px'] span a", # Links are <a> within <span> within styled <div>s
+        "skip_dt_count": 0,
+        "link_area_selector": "div[style*='height:40px'] span a",
+    },
+    "chapter_content_selectors": {
+        # Selector based on inspecting https://www.dxmwx.org/read/57132_50211576.html
+        "container": [('div', {'id': 'Lab_Contents'})], # Content is in div#Lab_Contents
+    },
+    "ads_patterns": [
+        r'大熊猫文学',
+        r'www\.dxmwx\.org',
+        # Add more patterns if needed
+    ],
+    "needs_metadata_fetch": False, # Metadata and chapters on same page
+}
 }
 
 def get_site_config(url):
@@ -263,24 +299,47 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
     if not author or author == "Unknown Author":
          info_container = find_element('info_div') # Find the container for author info
          if info_container:
-             # Search within all text nodes or specific tags like <p>
-             p_tags = info_container.find_all('p') # Common place for author info
              author_label = selectors.get('author_fallback_p_text', '作者：') # Get site-specific label
+             author_link_selector = selectors.get('author_link_selector') # Get site-specific link selector (e.g., for dxmwx)
              found = False
-             for p in p_tags:
-                  if author_label in p.text:
-                      author = p.text.replace(author_label, '').strip()
-                      # Handle cases where author might be a link inside the p tag
-                      if not author and p.find('a'):
-                          author = p.find('a').text.strip()
-                      found = True
-                      break
-             # If not found in <p>, try searching all text in the container
+
+             # Try finding the specific author link first if a selector is provided
+             if author_link_selector:
+                  # Find the element containing the label first
+                  # Use lambda to search text content across different tags
+                  label_element = info_container.find(lambda tag: tag.name != 'script' and author_label in tag.get_text())
+                  if label_element:
+                      # Search for the specific link *within* the label element
+                      author_link = label_element.select_one(author_link_selector)
+                      if author_link:
+                          author = author_link.text.strip()
+                          found = True
+                          logging.debug(f"Found author using author_link_selector: {author}")
+
+             # Fallback 1: Search common tags like <p> for the label
+             if not found:
+                 possible_tags = info_container.find_all(['p', 'div', 'span']) # Search common tags
+                 for tag in possible_tags:
+                      if author_label in tag.text:
+                          # Try extracting text directly after label
+                          author = tag.text.replace(author_label, '').strip()
+                          # If empty, try finding any 'a' tag within this element
+                          if not author and tag.find('a'):
+                              author = tag.find('a').text.strip()
+                          if author: # Found author in this tag
+                              found = True
+                              logging.debug(f"Found author using fallback 1 (p/div/span): {author}")
+                              break
+
+             # Fallback 2: Search the entire container text using regex
              if not found:
                  container_text = info_container.get_text(" ", strip=True)
-                 match = re.search(re.escape(author_label) + r'\s*([^\s]+)', container_text)
+                 # Regex to find label and capture following non-whitespace chars
+                 match = re.search(re.escape(author_label) + r'\s*([^\s<]+)', container_text) # Avoid matching tags
                  if match:
                      author = match.group(1).strip()
+                     found = True
+                     logging.debug(f"Found author using fallback 2 (regex): {author}")
 
     author = author or "Unknown Author"
 
