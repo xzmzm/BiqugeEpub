@@ -6,6 +6,7 @@ import time
 import re
 import os
 import logging
+import mimetypes # Added for guessing image type
 
 # --- Configuration ---
 # Set up logging
@@ -97,19 +98,22 @@ def clean_html_content(html_content):
 
 # --- Main Logic ---
 
-def get_book_details(index_html):
-    """Extracts book title and author from the index page."""
+def get_book_details(index_html, book_url):
+    """Extracts book title, author, description, and cover image URL from the index page."""
     soup = BeautifulSoup(index_html, 'html.parser')
     # Try multiple selectors for title and author as site structure might vary
     title_tag = soup.find('meta', property='og:title') or soup.find('h1')
     author_tag = soup.find('meta', property='og:novel:author')
     status_tag = soup.find('meta', property='og:novel:status')
     description_tag = soup.find('meta', property='og:description')
+    cover_image_tag = soup.select_one('#fmimg img') # Selector for the cover image
+    # cover_image_tag = soup.find('meta', property='og:image') # Alternative if the site uses og:image
 
     title = title_tag['content'].strip() if title_tag and title_tag.has_attr('content') else (title_tag.text.strip() if title_tag else "Unknown Title")
     author = author_tag['content'].strip() if author_tag else "Unknown Author"
     status = status_tag['content'].strip() if status_tag else "Unknown Status"
     description = description_tag['content'].strip() if description_tag else "No description available."
+    cover_image_url = requests.compat.urljoin(book_url, cover_image_tag['src']) if cover_image_tag and cover_image_tag.get('src') else None
 
     # Refine author extraction if needed (sometimes it's in a <p> tag)
     if author == "Unknown Author":
@@ -125,7 +129,8 @@ def get_book_details(index_html):
     logging.info(f"Author: {author}")
     logging.info(f"Status: {status}")
     logging.info(f"Description: {description[:100]}...") # Log first 100 chars
-    return title, author, description
+    logging.info(f"Cover Image URL: {cover_image_url}")
+    return title, author, description, cover_image_url
 
 def get_chapter_links(index_html, book_url):
     """Extracts chapter links and titles from the index page."""
@@ -173,7 +178,7 @@ def get_chapter_links(index_html, book_url):
     logging.info(f"Found {len(chapters)} potential chapter links.")
     return chapters
 
-def create_epub(title, author, description, chapters_data, book_url):
+def create_epub(title, author, description, chapters_data, book_url, cover_image_url):
     """Creates an EPUB file from the chapter data."""
     book = epub.EpubBook()
 
@@ -187,6 +192,25 @@ def create_epub(title, author, description, chapters_data, book_url):
     book.add_metadata('DC', 'description', description)
     book.add_metadata('DC', 'source', book_url)
 
+    # --- Add Cover Image ---
+    cover_image_content = None
+    cover_item = None
+    if cover_image_url:
+        logging.info(f"Attempting to download cover image: {cover_image_url}")
+        try:
+            img_response = requests.get(cover_image_url, headers=HEADERS, timeout=30, stream=True)
+            img_response.raise_for_status()
+            cover_image_content = img_response.content
+            # Guess image type from URL or fallback
+            img_mimetype, _ = mimetypes.guess_type(cover_image_url)
+            if not img_mimetype:
+                img_mimetype = 'image/jpeg' # Default fallback
+            cover_item = epub.EpubItem(uid='cover_image', file_name=f'cover.{mimetypes.guess_extension(img_mimetype) or ".jpg"}', media_type=img_mimetype, content=cover_image_content)
+            book.add_item(cover_item)
+            book.set_cover(cover_item.file_name, cover_image_content) # Use set_cover for better compatibility
+            logging.info(f"Cover image downloaded and added ({img_mimetype}).")
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Could not download or add cover image: {e}")
 
     # Create chapters and add to book
     epub_chapters = []
@@ -327,7 +351,11 @@ p {
 
     # Create spine (order of items in the book)
     # Start with title page, then chapters
-    book.spine = [title_page, 'nav'] + epub_chapters
+    # 'cover' is often automatically added by set_cover, but explicitly adding is safer.
+    # If set_cover creates its own page, we might not need title_page in the spine.
+    # Let's try including both cover (if exists) and title_page.
+    spine_items = ['nav', title_page] + epub_chapters
+    book.spine = ['cover'] + spine_items if cover_item else spine_items
 
     # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -360,7 +388,7 @@ if __name__ == "__main__":
     index_html = fetch_url(book_index_url)
 
     if index_html:
-        book_title, book_author, book_description = get_book_details(index_html)
+        book_title, book_author, book_description, cover_url = get_book_details(index_html, book_index_url)
 
         chapter_links = get_chapter_links(index_html, book_index_url)
 
@@ -395,7 +423,7 @@ if __name__ == "__main__":
 
             if chapters_content_data:
                 logging.info(f"\nCollected content for {len(chapters_content_data)} chapters. Creating EPUB...")
-                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url)
+                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url)
             else:
                 logging.error("No chapter content collected. EPUB creation aborted.")
         else:
