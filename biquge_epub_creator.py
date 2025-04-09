@@ -68,18 +68,20 @@ SITE_CONFIGS = {
         "metadata_url_template": "{base_url}/book/{book_id}.htm", # Template to get metadata page
         "metadata_selectors": {
             # Selectors based on inspecting www.69shuba.com/book/85122.htm
-            "title_fallback": '.booknav h1', # Title is in h1 inside div.booknav
-            "author_fallback_p_text": '作者：', # Standard colon, found in p tag
-            "status_meta": None, # No obvious status meta tag found
-            "description_fallback": '.intro', # Description is in div.intro
-            "cover_fallback": '.bookimg img', # Cover is in div.bookimg img
-            "info_div": ('div', {'class': 'booknav'}), # Container for author etc.
-            # No obvious meta tags found for these on .htm page
-            "title_meta": None,
-            "author_meta": None,
-            "description_meta": None,
-            "cover_meta": None,
+            # Prioritize Open Graph meta tags
+            "title_meta": ('meta', {'property': 'og:title'}),
+            "author_meta": ('meta', {'property': 'og:novel:author'}),
+            "status_meta": ('meta', {'property': 'og:novel:status'}),
+            "description_meta": ('meta', {'property': 'og:description'}),
+            "cover_meta": ('meta', {'property': 'og:image'}),
+            # Fallbacks (corrected selectors)
+            "title_fallback": '.booknav2 h1 a', # Get text from link inside h1
+            "author_fallback_p_text": '作者：', # Text label before author link
+            "cover_fallback": '.bookimg2 img', # Image tag within its div
+            "info_div": ('div', {'class': 'booknav2'}), # Container for author fallback search
+            # Removed description_fallback as meta tag is better and reliable fallback is complex
         },
+        "chapter_list_url_template": "{base_url}/book/{book_id}/", # Added for consistency
         "chapter_list_selectors": {
             # Selectors based on inspecting www.69shuba.com/book/85122/
             "container": ('div', {'class': 'catalog', 'id': 'catalog'}), # Chapters are in div.catalog#catalog -> ul
@@ -101,31 +103,34 @@ SITE_CONFIGS = {
              r'Copyright \d+ 69书吧', # Remove copyright
         ],
         "needs_metadata_fetch": True, # Metadata is on .htm page, chapters on / page
-    }
-},
-"dxmwx.org": {
+    },
+    "dxmwx.org": {
     "base_url": "https://www.dxmwx.org",
     "encoding": "utf-8", # Hint
+    "metadata_url_template": "{base_url}/book/{book_id}.html", # Metadata page URL
+    "chapter_list_url_template": "{base_url}/chapter/{book_id}.html", # Chapter list page URL
     "metadata_selectors": {
-        # Selectors based on inspecting https://www.dxmwx.org/chapter/57132.html
-        "title_fallback": "div[style*='font-size: 26px']", # Title is in a styled div
-        "author_fallback_p_text": '作者：', # Standard colon, but author is in a link
-        "author_link_selector": "a[href='#']", # Specific selector for the author link within the author text block
-        "status_meta": None, # No obvious status
-        "description_meta": ('meta', {'name': 'description'}), # Description is in meta tag
-        "cover_fallback": None, # No cover image observed on index page
-        "info_div": ('div', {'style': 'line-height: 32px; font-size: 12px; color: #999; margin-bottom: 20px; text-align: center;'}), # Container for author etc.
-        "title_meta": None,
-        "author_meta": None,
-        "cover_meta": None,
+        # Selectors based on inspecting https://www.dxmwx.org/book/57132.html (Metadata Page)
+        # Prioritize Open Graph meta tags
+        "title_meta": ('meta', {'property': 'og:novel:book_name'}), # Use book_name for title
+        "author_meta": ('meta', {'property': 'og:novel:author'}),
+        "status_meta": ('meta', {'property': 'og:novel:status'}),
+        "description_meta": ('meta', {'property': 'og:description'}),
+        "cover_meta": ('meta', {'property': 'og:image'}),
+        # Fallbacks (less critical now, based on /book/ page structure)
+        "title_fallback": "div[style*='font-size: 24px'] span", # Title span in styled div
+        "author_fallback_p_text": '著', # Text label after author link
+        "cover_fallback": '.imgwidth img', # Image tag within its div
+        "info_div": ('div', {'style': 'float: left; width: 60%;'}), # Container div for author fallback
+        "author_link_selector": "a[href*='/list/']", # Author link selector within info_div
     },
     "chapter_list_selectors": {
         # Selectors based on inspecting https://www.dxmwx.org/chapter/57132.html
         # Chapters are in multiple divs, need to select all relevant links
         "container": None, # No single container, select links directly from body/main area
-        "link_selector": "div[style*='height:40px'] span a", # Links are <a> within <span> within styled <div>s
+        "link_selector": "a[href^='/read/']", # Select links whose href starts with /read/
         "skip_dt_count": 0,
-        "link_area_selector": "div[style*='height:40px'] span a",
+        "link_area_selector": "a[href^='/read/']", # Use same selector here
     },
     "chapter_content_selectors": {
         # Selector based on inspecting https://www.dxmwx.org/read/57132_50211576.html
@@ -136,8 +141,8 @@ SITE_CONFIGS = {
         r'www\.dxmwx\.org',
         # Add more patterns if needed
     ],
-    "needs_metadata_fetch": False, # Metadata and chapters on same page
-}
+    "needs_metadata_fetch": True, # Metadata and chapters are on DIFFERENT pages
+    }
 }
 
 def get_site_config(url):
@@ -405,39 +410,63 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
     container_fallback_selector = selectors.get('container_fallback')
     chapter_list_container = find_element('container') or find_element('container_fallback')
 
-    if not chapter_list_container:
-        logging.error(f"Could not find chapter list container using selectors: {container_selector}, {container_fallback_selector}.")
-        return []
+    # Check if a container was found *if* one was expected.
+    # If a container was expected but not found, log an error, but still allow fallback attempts below.
+    if container_selector is not None and not chapter_list_container:
+        logging.warning(f"Expected chapter list container not found using selectors: {container_selector}, {container_fallback_selector}. Will attempt fallback link selection.")
 
     # --- Select Links based on Config ---
     links_elements = []
     skip_dt_count = selectors.get('skip_dt_count', 0)
     link_selector = selectors.get('link_selector', 'a') # Default to 'a'
 
-    if skip_dt_count > 0:
-        # Logic for sites like bqg5 that need skipping based on <dt>
-        dt_elements = chapter_list_container.find_all('dt')
-        if len(dt_elements) >= skip_dt_count:
-            target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
-            chapter_links_siblings = target_dt.find_next_siblings()
-            link_area_selector = selectors.get('link_area_selector', 'a') # e.g., 'dd a'
-            # Determine the tag name to check for siblings (e.g., 'dd' from 'dd a')
-            sibling_tag_name = link_area_selector.split()[0] if ' ' in link_area_selector else 'a'
+    if chapter_list_container: # If a container was found
+        if skip_dt_count > 0:
+            # Logic for sites like bqg5 that need skipping based on <dt>
+            dt_elements = chapter_list_container.find_all('dt')
+            if len(dt_elements) >= skip_dt_count:
+                target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
+                chapter_links_siblings = target_dt.find_next_siblings()
+                link_area_selector = selectors.get('link_area_selector', 'a') # e.g., 'dd a'
+                # Determine the tag name to check for siblings (e.g., 'dd' from 'dd a')
+                sibling_tag_name = link_area_selector.split()[0] if ' ' in link_area_selector else 'a'
 
-            for element in chapter_links_siblings:
-                 # Check if the element is a Tag and matches the expected sibling type
-                 if hasattr(element, 'name') and element.name == sibling_tag_name:
-                     # Find the link within the sibling element using the full selector part
-                     link = element.select_one(link_area_selector) if ' ' in link_area_selector else (element if element.name == 'a' else None)
-                     if link:
-                         links_elements.append(link)
+                for element in chapter_links_siblings:
+                     # Check if the element is a Tag and matches the expected sibling type
+                     if hasattr(element, 'name') and element.name == sibling_tag_name:
+                         # Find the link within the sibling element using the full selector part
+                         link = element.select_one(link_area_selector) if ' ' in link_area_selector else (element if element.name == 'a' else None)
+                         if link:
+                             links_elements.append(link)
+            else:
+                 # Fallback to selecting all links if dt structure not found as expected
+                 logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links within container.")
+                 links_elements = chapter_list_container.select(link_selector)
         else:
-             # Fallback to selecting all links if dt structure not found as expected
-             logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links.")
-             links_elements = chapter_list_container.select(link_selector)
-    else:
-        # Simpler logic for sites like 69shuba (or fallback)
-        links_elements = chapter_list_container.select(link_selector)
+            # Simpler logic for sites like 69shuba (or fallback within a container)
+            links_elements = chapter_list_container.select(link_selector)
+    elif container_selector is None and link_selector: # If container is explicitly None in config, select directly from soup
+         logging.debug(f"No container specified. Selecting links directly from page using: {link_selector}")
+         links_elements = soup.select(link_selector)
+    elif not chapter_list_container and not link_selector: # Case: No container found AND no link selector specified
+         logging.error("Chapter list container not found and no link selector specified.")
+         # links_elements remains empty
+    elif not chapter_list_container and link_selector: # Case: Container selector failed (or was None), but we have a link selector
+         if container_selector is not None: # Log only if a container was expected but not found
+              logging.warning(f"Chapter list container not found using selectors: {container_selector}, {container_fallback_selector}. Attempting to select links directly from page using: {link_selector}")
+         else: # Log if container was None from the start
+              logging.debug(f"No container specified. Selecting links directly from page using: {link_selector}")
+         links_elements = soup.select(link_selector) # Try selecting directly
+
+    # After all attempts, check if links were found
+    if not links_elements:
+        logging.error("Failed to find any chapter links after all selection attempts.")
+        return []
+
+    # After all attempts, check if links were found
+    if not links_elements:
+        logging.error("Failed to find any chapter links after all selection attempts.")
+        return []
 
     # --- Process Selected Links ---
     seen_urls = set() # Avoid duplicate chapters
@@ -472,6 +501,15 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
                 is_likely_chapter = False
 
             if is_likely_chapter and full_url not in seen_urls:
+                # --- Site-specific filtering ---
+                # For dxmwx.org, skip the "Latest Chapter" link in the header
+                if "dxmwx.org" in site_config.get("base_url", ""):
+                    parent_span = link.find_parent('span')
+                    if parent_span and "最新章节：" in parent_span.get_text():
+                        logging.debug(f"Skipping latest chapter link in header: {title} ({full_url})")
+                        continue # Skip this link
+
+                # --- General processing ---
                 # Simple title cleaning (remove potential artifacts)
                 title = re.sub(r'^（\d+）', '', title).strip() # Remove leading (number) if present
                 # Remove common prefixes/suffixes if needed
@@ -481,9 +519,13 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
                 seen_urls.add(full_url)
 
     logging.info(f"Found {len(chapters)} potential chapter links.")
+    # Reverse chapter order for sites that list newest first (like 69shuba)
+    if "69shuba.com" in site_config.get("base_url", ""):
+         logging.info("Reversing chapter order for 69shuba.com.")
+         chapters.reverse()
     return chapters
 
-def create_epub(title, author, description, chapters_data, book_url, cover_image_url):
+def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory):
     """Creates an EPUB file from the chapter data."""
     book = epub.EpubBook()
 
@@ -662,14 +704,16 @@ p {
     spine_items = ['nav', title_page] + epub_chapters
     book.spine = ['cover'] + spine_items if cover_item else spine_items
 
+    # Use the provided output directory or the default
+    target_output_dir = output_directory if output_directory else OUTPUT_DIR
     # Create output directory if it doesn't exist
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(target_output_dir, exist_ok=True)
 
     # Sanitize filename
     sanitized_title = re.sub(r'[\\/*?:"<>|]',"", title) # Remove invalid characters
     sanitized_title = re.sub(r'\s+', '_', sanitized_title) # Replace spaces with underscores
     output_filename = OUTPUT_FILENAME_TEMPLATE.format(title=sanitized_title)
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    output_path = os.path.join(target_output_dir, output_filename)
 
     # Save EPUB file
     try:
@@ -686,7 +730,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Download chapters from bqg5.com or 69shuba.com book index page and create an EPUB.')
     # Changed default to None, make URL required, removed nargs='?'
     parser.add_argument('url', help='The URL of the book index page (e.g., https://www.bqg5.com/0_521/ or https://www.69shuba.com/book/85122/)')
+    parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number (inclusive, default: 1)')
+    parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number (inclusive, default: last chapter)')
+    parser.add_argument('-o', '--output-dir', default=None, help=f'Directory to save the EPUB file (default: {OUTPUT_DIR})')
     args = parser.parse_args()
+
     # Clean up URL slightly (remove trailing slash, whitespace)
     book_index_url = args.url.strip().rstrip('/')
 
@@ -722,8 +770,9 @@ if __name__ == "__main__":
 
             book_id = book_id_match.group(1)
             metadata_url_template = site_config.get('metadata_url_template')
-            if not metadata_url_template:
-                 raise ValueError("Missing 'metadata_url_template' in site config")
+            chapter_list_url_template = site_config.get('chapter_list_url_template') # Get chapter list template
+            if not metadata_url_template or not chapter_list_url_template:
+                 raise ValueError("Missing 'metadata_url_template' or 'chapter_list_url_template' in site config")
 
             metadata_url = metadata_url_template.format(base_url=site_config['base_url'], book_id=book_id)
             logging.info(f"Fetching metadata page: {metadata_url}")
@@ -731,15 +780,15 @@ if __name__ == "__main__":
             if not metadata_html:
                  raise ConnectionError(f"Failed to fetch metadata page: {metadata_url}")
 
-            # Fetch the index page (chapter list) separately using the original URL
-            # Ensure trailing slash for sites like 69shuba chapter list
-            chapter_list_fetch_url = book_index_url
-            if not chapter_list_fetch_url.endswith('/'):
-                chapter_list_fetch_url += '/'
+            # Construct and fetch the chapter list page URL using the template
+            chapter_list_fetch_url = chapter_list_url_template.format(base_url=site_config['base_url'], book_id=book_id)
             logging.info(f"Fetching chapter list page: {chapter_list_fetch_url}")
             index_html = fetch_url(chapter_list_fetch_url)
             if not index_html:
                  raise ConnectionError(f"Failed to fetch chapter list page: {chapter_list_fetch_url}")
+
+            # Important: Update book_index_url to the chapter list URL for subsequent use (e.g., resolving relative chapter links)
+            book_index_url = chapter_list_fetch_url
 
         except (ValueError, ConnectionError, KeyError, AttributeError) as e:
              logging.error(f"Error preparing URLs or fetching initial pages for {site_config['base_url']}: {e}")
@@ -759,6 +808,33 @@ if __name__ == "__main__":
         book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config)
 
         chapter_links = get_chapter_links(index_html, book_index_url, site_config)
+
+        # --- Apply Chapter Range ---
+        start_chapter_num = args.start_chapter
+        end_chapter_num = args.end_chapter
+        original_chapter_count = len(chapter_links)
+
+        # Convert chapter numbers to 0-based list indices
+        start_index = start_chapter_num - 1
+        end_index = end_chapter_num if end_chapter_num is not None else original_chapter_count
+
+        # Validate indices
+        if start_index < 0:
+            logging.warning(f"Start chapter {start_chapter_num} is invalid. Using chapter 1.")
+            start_index = 0
+        if end_index > original_chapter_count:
+            logging.warning(f"End chapter {end_chapter_num} is greater than total chapters ({original_chapter_count}). Using last chapter.")
+            end_index = original_chapter_count
+        if start_index >= end_index:
+             logging.warning(f"Start chapter ({start_chapter_num}) is greater than or equal to end chapter ({end_chapter_num}). Only downloading chapter {start_chapter_num}.")
+             end_index = start_index + 1 # Ensure at least the start chapter is included
+
+        # Slice the chapter list
+        if start_index > 0 or end_index < original_chapter_count:
+             logging.info(f"Selecting chapters from {start_index + 1} to {end_index} (inclusive).")
+             chapter_links = chapter_links[start_index:end_index]
+        else:
+             logging.info(f"Selecting all {original_chapter_count} chapters.")
 
         if chapter_links:
             chapters_content_data = []
@@ -804,8 +880,8 @@ if __name__ == "__main__":
 
             if chapters_content_data:
                 logging.info(f"\nCollected content for {len(chapters_content_data)} chapters. Creating EPUB...")
-                # Pass the original book_index_url as the source URL for metadata
-                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url)
+                # Pass the original book_index_url as the source URL for metadata and the output directory
+                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url, args.output_dir)
             else:
                 logging.error("No chapter content collected. EPUB creation aborted.")
         else:
