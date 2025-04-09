@@ -525,7 +525,7 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
          chapters.reverse()
     return chapters
 
-def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory):
+def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory, include_cover_page): # Added include_cover_page
     """Creates an EPUB file from the chapter data."""
     book = epub.EpubBook()
 
@@ -702,7 +702,8 @@ p {
     # If set_cover creates its own page, we might not need title_page in the spine.
     # Let's try including both cover (if exists) and title_page.
     spine_items = ['nav', title_page] + epub_chapters
-    book.spine = ['cover'] + spine_items if cover_item else spine_items
+    # Only add 'cover' to the spine if the flag is set and a cover item exists
+    book.spine = ['cover'] + spine_items if cover_item and include_cover_page else spine_items
 
     # Use the provided output directory or the default
     target_output_dir = output_directory if output_directory else OUTPUT_DIR
@@ -733,6 +734,7 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number (inclusive, default: 1)')
     parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number (inclusive, default: last chapter)')
     parser.add_argument('-o', '--output-dir', default=None, help=f'Directory to save the EPUB file (default: {OUTPUT_DIR})')
+    parser.add_argument('-i', '--include-cover-page', action='store_true', default=False, help='Include the cover image as the first page in the reading order (default: False)')
     args = parser.parse_args()
 
     # Clean up URL slightly (remove trailing slash, whitespace)
@@ -880,8 +882,8 @@ if __name__ == "__main__":
 
             if chapters_content_data:
                 logging.info(f"\nCollected content for {len(chapters_content_data)} chapters. Creating EPUB...")
-                # Pass the original book_index_url as the source URL for metadata and the output directory
-                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url, args.output_dir)
+                # Pass the original book_index_url as the source URL for metadata, the output directory, and the cover page flag
+                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url, args.output_dir, args.include_cover_page)
             else:
                 logging.error("No chapter content collected. EPUB creation aborted.")
         else:
