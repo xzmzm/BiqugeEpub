@@ -734,7 +734,7 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number (inclusive, default: 1)')
     parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number (inclusive, default: last chapter)')
     parser.add_argument('-o', '--output-dir', default=None, help=f'Directory to save the EPUB file (default: {OUTPUT_DIR})')
-    parser.add_argument('-i', '--include-cover-page', action='store_true', default=False, help='Include the cover image as the first page in the reading order (default: False)')
+    parser.add_argument('--include-cover-page', action='store_true', default=False, help='Include the cover image as the first page in the reading order (default: False)')
     args = parser.parse_args()
 
     # Clean up URL slightly (remove trailing slash, whitespace)
