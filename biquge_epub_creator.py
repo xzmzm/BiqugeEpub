@@ -43,11 +43,11 @@ SITE_CONFIGS = {
             "info_div": ('div', {'id': 'info'}),
         },
         "chapter_list_selectors": {
-            "container": ('div', {'id': 'list'}),
-            "container_fallback": 'dl',
-            "link_selector": 'a',
-            "skip_dt_count": 2, # Skip links before the second <dt>
-            "link_area_selector": 'dd a', # Links are within <dd><a> after the target <dt>
+            "container": ('div', {'id': 'list'}), # Target the main div
+            "container_fallback": 'dl', # Fallback if div#list not found (less likely needed now)
+            "link_selector": 'a', # General fallback selector
+            "skip_dt_count": 2, # Skip links before the second <dt> (the one titled "《...》免费章节")
+            "link_area_selector": 'dd a', # Links are within <a> tags inside <dd> siblings following the target <dt>
         },
         "chapter_content_selectors": {
             "container": [('div', {'id': 'content'}), ('div', {'class_': 'content'}), ('div', {'id': 'booktxt'})], # List of selectors to try
@@ -390,7 +390,13 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
 
 def get_chapter_links(index_html, book_url, site_config): # Added site_config
     """Extracts chapter links and titles from the index page."""
-    soup = BeautifulSoup(index_html, 'html.parser')
+    # Explicitly use encoding hint from site_config for parsing, if available
+    site_encoding = site_config.get('encoding')
+    if site_encoding:
+        logging.debug(f"Using encoding hint for BeautifulSoup in get_chapter_links: {site_encoding}")
+        soup = BeautifulSoup(index_html, 'html.parser', from_encoding=site_encoding)
+    else:
+        soup = BeautifulSoup(index_html, 'html.parser') # Default parser if no hint
     chapters = []
     selectors = site_config['chapter_list_selectors']
 
@@ -420,48 +426,50 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
     skip_dt_count = selectors.get('skip_dt_count', 0)
     link_selector = selectors.get('link_selector', 'a') # Default to 'a'
 
-    if chapter_list_container: # If a container was found
-        if skip_dt_count > 0:
-            # Logic for sites like bqg5 that need skipping based on <dt>
-            dt_elements = chapter_list_container.find_all('dt')
-            if len(dt_elements) >= skip_dt_count:
-                target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
-                chapter_links_siblings = target_dt.find_next_siblings()
-                link_area_selector = selectors.get('link_area_selector', 'a') # e.g., 'dd a'
-                # Determine the tag name to check for siblings (e.g., 'dd' from 'dd a')
-                sibling_tag_name = link_area_selector.split()[0] if ' ' in link_area_selector else 'a'
+    # Find the main chapter list container (div#list)
+    chapter_list_container = soup.find('div', {'id': 'list'})
 
-                for element in chapter_links_siblings:
-                     # Check if the element is a Tag and matches the expected sibling type
-                     if hasattr(element, 'name') and element.name == sibling_tag_name:
-                         # Find the link within the sibling element using the full selector part
-                         link = element.select_one(link_area_selector) if ' ' in link_area_selector else (element if element.name == 'a' else None)
-                         if link:
-                             links_elements.append(link)
-            else:
-                 # Fallback to selecting all links if dt structure not found as expected
-                 logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links within container.")
-                 links_elements = chapter_list_container.select(link_selector)
-        else:
-            # Simpler logic for sites like 69shuba (or fallback within a container)
-            links_elements = chapter_list_container.select(link_selector)
-    elif container_selector is None and link_selector: # If container is explicitly None in config, select directly from soup
-         logging.debug(f"No container specified. Selecting links directly from page using: {link_selector}")
-         links_elements = soup.select(link_selector)
-    elif not chapter_list_container and not link_selector: # Case: No container found AND no link selector specified
-         logging.error("Chapter list container not found and no link selector specified.")
-         # links_elements remains empty
-    elif not chapter_list_container and link_selector: # Case: Container selector failed (or was None), but we have a link selector
-         if container_selector is not None: # Log only if a container was expected but not found
-              logging.warning(f"Chapter list container not found using selectors: {container_selector}, {container_fallback_selector}. Attempting to select links directly from page using: {link_selector}")
-         else: # Log if container was None from the start
-              logging.debug(f"No container specified. Selecting links directly from page using: {link_selector}")
-         links_elements = soup.select(link_selector) # Try selecting directly
-
-    # After all attempts, check if links were found
-    if not links_elements:
-        logging.error("Failed to find any chapter links after all selection attempts.")
+    if not chapter_list_container:
+        logging.error("Main chapter list container (div#list) not found.")
         return []
+    logging.debug(f"Found chapter list container: {chapter_list_container.name}#{chapter_list_container.get('id')}") # DEBUG
+
+    # Find the dl tag within the list_div
+    dl_tag = chapter_list_container.find('dl')
+
+    if not dl_tag:
+        logging.error("DL tag within div#list not found.")
+        return []
+    logging.debug("Found DL tag within container.") # DEBUG
+
+    if skip_dt_count > 0:
+        # Logic for sites like bqg5 that need skipping based on <dt>
+        dt_elements = dl_tag.find_all('dt')
+        logging.debug(f"Found {len(dt_elements)} dt elements.") # DEBUG
+        if len(dt_elements) >= skip_dt_count:
+            target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
+            logging.debug(f"Target DT ({skip_dt_count}): {target_dt.text[:50]}...") # DEBUG
+            # Find all dd siblings after the target dt
+            chapter_dd_siblings = target_dt.find_next_siblings('dd')
+            logging.debug(f"Found {len(list(chapter_dd_siblings))} dd siblings after target DT.") # DEBUG - Convert generator to list for count
+            # Re-iterate after counting
+            chapter_dd_siblings = target_dt.find_next_siblings('dd')
+            for dd_index, dd_element in enumerate(chapter_dd_siblings):
+                # Find the link within the dd element
+                link = dd_element.find('a')
+                if link:
+                    logging.debug(f"  Found link in dd {dd_index+1}: {link.get('href')} - {link.text.strip()}") # DEBUG
+                    links_elements.append(link)
+                else:
+                    logging.debug(f"  No link found in dd {dd_index+1}") # DEBUG
+        else:
+             # Fallback to selecting all links if dt structure not found as expected
+             logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links within DL.")
+             links_elements = dl_tag.find_all('a') # Select all links within the dl
+             logging.debug(f"Fallback: Found {len(links_elements)} links directly within DL.") # DEBUG
+    else:
+        # Simpler logic for sites like 69shuba (or if no skipping needed)
+        links_elements = dl_tag.find_all('a') # Select all links within the dl
 
     # After all attempts, check if links were found
     if not links_elements:
@@ -469,6 +477,7 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
         return []
 
     # --- Process Selected Links ---
+    chapters = []
     seen_urls = set() # Avoid duplicate chapters
     base_site_url = site_config.get("base_url", book_url) # Use for joining relative URLs
 
@@ -479,26 +488,30 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
         # Basic filtering for valid chapter links
         if href and title and not href.startswith(('javascript:', '#')) and len(title) > 0:
             # Construct absolute URL if relative
-            # Important: Join with the base site URL, not necessarily the index page URL
             full_url = requests.compat.urljoin(base_site_url, href)
 
             # Additional filter: check if URL path looks like a chapter
-            # Make heuristic more robust: allow different patterns
             is_likely_chapter = False
             try:
                 path = requests.utils.urlparse(full_url).path
                 # Common patterns: /book_id/chapter_id.html, /txt/book_id/chapter_id, /read/book_id/chapter_id/, /digits/digits.html etc.
+                # Updated regex to handle bqg5 structure like /1_1529/457152.html
                 if re.search(r'/\d+/\d+(?:\.html)?$', path) or \
                    re.search(r'/txt/\d+/\d+', path) or \
                    re.search(r'/read/\d+/\d+', path) or \
-                   re.search(r'/\d+_\d+(?:\.html)?$', path):
+                   re.search(r'/\d+_\d+/\d+\.html$', path): # Added this pattern
                     is_likely_chapter = True
             except Exception:
                 pass # Ignore URL parsing errors for filtering
 
             # Filter out known non-chapter links (e.g., '/info/', '/reviews/')
-            if '/comm/' in full_url or '/info/' in full_url or '/review' in full_url:
+            if '/comm/' in full_url or '/info/' in full_url or '/review' in full_url or '/jifen.html' in full_url or '/dns.html' in full_url or '/zhuomian.php' in full_url or '/login.php' in full_url or '/register.php' in full_url: # Added more specific filters based on HTML
                 is_likely_chapter = False
+
+            # Also filter out links that are just the book index URL itself
+            if full_url.rstrip('/') == book_url.rstrip('/'):
+                 is_likely_chapter = False
+
 
             if is_likely_chapter and full_url not in seen_urls:
                 # --- Site-specific filtering ---
@@ -517,8 +530,11 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
 
                 chapters.append({'title': title, 'url': full_url})
                 seen_urls.add(full_url)
+            else: # DEBUG: Log why a link was skipped
+                logging.debug(f"Skipping link: Title='{title}', Href='{href}', LikelyChapter={is_likely_chapter}, Seen={full_url in seen_urls}")
 
     logging.info(f"Found {len(chapters)} potential chapter links.")
+    logging.debug(f"Final chapter list before return: {[c['title'] for c in chapters[:5]]}...") # DEBUG first 5 titles
     # Reverse chapter order for sites that list newest first (like 69shuba)
     if "69shuba.com" in site_config.get("base_url", ""):
          logging.info("Reversing chapter order for 69shuba.com.")
@@ -733,16 +749,33 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number (inclusive, default: 1)')
     parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number (inclusive, default: last chapter)')
     parser.add_argument('-o', '--output-dir', default=None, help=f'Directory to save the EPUB file (default: {OUTPUT_DIR})')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging') # DEBUG argument
     args = parser.parse_args()
 
-    # Clean up URL slightly (remove trailing slash, whitespace)
-    book_index_url = args.url.strip().rstrip('/')
+    # --- Configure Logging Level ---
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("Debug logging enabled.")
+
+    # Clean up URL whitespace
+    book_index_url = args.url.strip()
 
     # --- Site Detection and Config ---
+    # Detect site *before* potentially modifying the trailing slash
     site_config = get_site_config(book_index_url)
     if not site_config:
          logging.error(f"Unsupported website URL provided: {book_index_url}")
          sys.exit(1) # Exit if site is not supported
+
+    # Ensure trailing slash for bqg5.com, remove for others
+    if "bqg5.com" in site_config.get("base_url", ""):
+        if not book_index_url.endswith('/'):
+            book_index_url += '/'
+            logging.debug("Ensured trailing slash for bqg5.com URL.")
+    else:
+        # Original behavior for other sites: remove trailing slash
+        book_index_url = book_index_url.rstrip('/')
+        logging.debug("Removed trailing slash for non-bqg5.com URL (if present).")
 
     logging.info(f"Starting EPUB creation for: {book_index_url}")
     logging.info(f"Using config for: {site_config['base_url']}")
