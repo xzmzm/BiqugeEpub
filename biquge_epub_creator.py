@@ -8,6 +8,7 @@ import os
 import logging
 import mimetypes # Added for guessing image type
 import sys # For exit
+import json # Added for handling JSON chapter lists
 # --- Configuration ---
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -142,6 +143,44 @@ SITE_CONFIGS = {
         # Add more patterns if needed
     ],
     "needs_metadata_fetch": True, # Metadata and chapters are on DIFFERENT pages
+    },
+    "ixdzs8.com": {
+        "base_url": "https://ixdzs8.com",
+        "encoding": "utf-8", # Hint
+        # Metadata is on the main page (e.g., /read/571203/)
+        "metadata_selectors": {
+            # Selectors based on inspecting https://ixdzs8.com/read/571203/
+            # Prioritize Open Graph meta tags
+            "title_meta": ('meta', {'property': 'og:novel:book_name'}),
+            "author_meta": ('meta', {'property': 'og:novel:author'}),
+            "status_meta": ('meta', {'property': 'og:novel:status'}),
+            "description_meta": ('meta', {'property': 'og:description'}),
+            "cover_meta": ('meta', {'property': 'og:image'}),
+            # Fallbacks
+            "title_fallback": 'div.n-text h1',
+            "author_fallback_p_text": '作者:', # Text label before author link in <p>
+            "cover_fallback": 'div.n-img img',
+            "info_div": ('div', {'class': 'n-text'}), # Container for author fallback search
+        },
+        # Chapter list requires a POST request
+        "chapter_list_method": "post_json",
+        "chapter_list_url_template": "{base_url}/novel/clist/",
+        "chapter_list_payload_key": "bid", # Key for book ID in POST data
+        "chapter_content_selectors": {
+            # Selector based on inspecting https://ixdzs8.com/read/571203/p35.html
+            "container": [('section', {})], # Content is within the <section> tag inside article.page-content
+        },
+        "ads_patterns": [
+            r'爱下电子书',
+            r'ixdzs8\.com',
+            r'ixdzs\.hk',
+            r'ixdzs\.tw',
+            r'\(AdProvider = window\.AdProvider.*', # JS ad block
+            r'<ins class="eas.*?</ins>', # Ad placeholder
+            r'<script>\(AdProvider.*?\{\}\);</script>', # Ad script
+            # Add more patterns if needed
+        ],
+        "needs_metadata_fetch": False, # Metadata on the same page as the chapter list trigger
     }
 }
 
@@ -167,25 +206,53 @@ def get_site_config(url):
 # --- Helper Functions ---
 # --- Helper Functions ---
 
-def fetch_url(url):
-    """Fetches content from a URL with retries and delay."""
+def fetch_url(url, method='GET', data=None):
+    """Fetches content from a URL with retries and delay, supporting GET and POST."""
     retries = 0
     while retries < MAX_RETRIES:
         try:
-            response = requests.get(url, headers=HEADERS, timeout=30)
+            if method.upper() == 'POST':
+                logging.debug(f"Making POST request to {url} with data: {data}")
+                response = requests.post(url, headers=HEADERS, data=data, timeout=30)
+            else: # Default to GET
+                logging.debug(f"Making GET request to {url}")
+                response = requests.get(url, headers=HEADERS, timeout=30)
+
             response.raise_for_status() # Raise an exception for bad status codes
-            # Try to detect encoding, fallback to gb18030 if detection fails or is incorrect
-            detected_encoding = response.apparent_encoding if response.apparent_encoding else 'gb18030'
+
+            # Handle JSON response directly for POST requests expecting JSON
+            if method.upper() == 'POST' and 'application/json' in response.headers.get('Content-Type', ''):
+                logging.info(f"Fetched JSON: {url} (Status: {response.status_code})")
+                time.sleep(REQUEST_DELAY)
+                try:
+                    return response.json() # Return parsed JSON object
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to decode JSON response from {url}: {e}")
+                    return None # Indicate JSON decode failure
+
+            # --- HTML Response Handling ---
+            # Try to detect encoding, fallback to site config hint or utf-8
+            site_config = get_site_config(url) # Get config again for encoding hint
+            fallback_encoding = site_config.get('encoding', 'utf-8') if site_config else 'utf-8'
+            detected_encoding = response.apparent_encoding if response.apparent_encoding else fallback_encoding
             response.encoding = detected_encoding
             # Force gb18030 if common Chinese characters are garbled with apparent_encoding
             # Check a larger portion of text for potential garbled characters
-            if '�' in response.text[:2000]:
-                 logging.warning(f"Garbled characters detected with encoding {detected_encoding} for {url}. Forcing gb18030.")
-                 response.encoding = 'gb18030'
+            response.encoding = detected_encoding
+            # Force fallback encoding if common Chinese characters are garbled
+            # Check a larger portion of text for potential garbled characters
+            # Use a more general check for garbled text
+            try:
+                text_preview = response.text[:2000]
+                if '�' in text_preview:
+                    logging.warning(f"Garbled characters detected with encoding {detected_encoding} for {url}. Forcing {fallback_encoding}.")
+                    response.encoding = fallback_encoding
+            except Exception as e:
+                logging.warning(f"Could not check for garbled characters: {e}")
 
-            logging.info(f"Fetched: {url} (Status: {response.status_code}, Encoding: {response.encoding})")
+            logging.info(f"Fetched HTML: {url} (Status: {response.status_code}, Encoding: {response.encoding})")
             time.sleep(REQUEST_DELAY)
-            return response.text
+            return response.text # Return HTML text
         except requests.exceptions.Timeout:
             retries += 1
             logging.warning(f"Timeout fetching {url}. Retrying ({retries}/{MAX_RETRIES})...")
@@ -388,8 +455,68 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
     logging.info(f"Cover Image URL: {cover_image_url}")
     return title, author, description, cover_image_url
 
-def get_chapter_links(index_html, book_url, site_config): # Added site_config
-    """Extracts chapter links and titles from the index page."""
+def get_chapter_links(index_html, book_url, site_config):
+    """Extracts chapter links and titles. Handles HTML parsing or POST JSON fetching."""
+    chapters = []
+    base_site_url = site_config.get("base_url", book_url)
+
+    # --- Handle POST JSON method (e.g., ixdzs8.com) ---
+    if site_config.get("chapter_list_method") == "post_json":
+        logging.info("Fetching chapter list via POST JSON method.")
+        post_url_template = site_config.get("chapter_list_url_template")
+        payload_key = site_config.get("chapter_list_payload_key", "bid") # Default to 'bid'
+
+        if not post_url_template:
+            logging.error("Missing 'chapter_list_url_template' in site config for POST JSON.")
+            return []
+
+        try:
+            # Extract book ID (bid) from the main book_url (e.g., https://ixdzs8.com/read/571203/)
+            book_id_match = re.search(r'/read/(\d+)/?', book_url)
+            if not book_id_match:
+                raise ValueError("Could not extract book ID (bid) from book URL for POST.")
+            book_id = book_id_match.group(1)
+
+            post_url = post_url_template.format(base_url=base_site_url)
+            post_data = {payload_key: book_id}
+
+            # Use fetch_url with POST method
+            json_response = fetch_url(post_url, method='POST', data=post_data)
+
+            if json_response and isinstance(json_response, dict) and json_response.get("rs") == 200:
+                chapter_list_data = json_response.get("data", [])
+                if not isinstance(chapter_list_data, list):
+                     logging.error(f"Unexpected data format in JSON response: 'data' is not a list. Response: {json_response}")
+                     return []
+
+                seen_urls = set()
+                for item in chapter_list_data:
+                    if isinstance(item, dict) and item.get("ctype") == "0": # Check if it's a chapter link
+                        title = item.get("title", "").strip()
+                        ordernum = item.get("ordernum")
+                        if title and ordernum:
+                            # Construct chapter URL (e.g., https://ixdzs8.com/read/571203/p35.html)
+                            chapter_url = f"{base_site_url}/read/{book_id}/p{ordernum}.html"
+                            if chapter_url not in seen_urls:
+                                chapters.append({'title': title, 'url': chapter_url})
+                                seen_urls.add(chapter_url)
+                            else:
+                                logging.debug(f"Skipping duplicate chapter URL from JSON: {chapter_url}")
+                        else:
+                            logging.warning(f"Skipping invalid chapter data from JSON: {item}")
+                logging.info(f"Found {len(chapters)} chapter links from JSON POST.")
+                # Note: JSON list is usually already in correct order, no reversal needed.
+                return chapters
+            else:
+                logging.error(f"Failed to fetch or parse chapter list JSON from {post_url}. Response: {json_response}")
+                return []
+
+        except (ValueError, KeyError, AttributeError, requests.exceptions.RequestException) as e:
+            logging.error(f"Error fetching/processing chapter list via POST JSON: {e}")
+            return []
+
+    # --- Handle HTML Parsing Method (default) ---
+    logging.info("Fetching chapter list via HTML parsing method.")
     # Explicitly use encoding hint from site_config for parsing, if available
     site_encoding = site_config.get('encoding')
     if site_encoding:
@@ -479,7 +606,9 @@ def get_chapter_links(index_html, book_url, site_config): # Added site_config
     # --- Process Selected Links ---
     chapters = []
     seen_urls = set() # Avoid duplicate chapters
-    base_site_url = site_config.get("base_url", book_url) # Use for joining relative URLs
+    # --- Process Selected Links (HTML Parsing specific part) ---
+    # This part remains largely the same as before, processing the links_elements found via HTML selectors
+    seen_urls = set() # Avoid duplicate chapters
 
     for link in links_elements:
         href = link.get('href')
@@ -788,12 +917,14 @@ if __name__ == "__main__":
     if site_config.get('needs_metadata_fetch', False):
         # Derive metadata URL (e.g., .htm page for 69shuba)
         try:
-            # Extract book ID for template (e.g., 85122 from https://www.69shuba.com/book/85122/)
-            # Make regex more general if needed
-            book_id_match = re.search(r'/(?:book|txt|info)/(\d+)', book_index_url)
+            # Extract book ID for template (e.g., 85122 from https://www.69shuba.com/book/85122/ or 571203 from https://ixdzs8.com/read/571203/)
+            # Make regex more general to handle different URL structures
+            book_id_match = re.search(r'/(?:book|txt|info|read|chapter)/(\d+)', book_index_url) # Added 'read', 'chapter'
             if not book_id_match:
-                # Try extracting last digits if pattern fails
-                book_id_match = re.search(r'/(\d+)/?$', book_index_url.split('/')[-1] if book_index_url.endswith('/') else book_index_url)
+                # Try extracting last digits if pattern fails (less reliable)
+                # Ensure we don't match the domain part if URL ends like .com/12345
+                path_part = requests.utils.urlparse(book_index_url).path
+                book_id_match = re.search(r'/(\d+)/?$', path_part)
                 if not book_id_match:
                      # Try extracting digits after _
                      book_id_match = re.search(r'_(\d+)', book_index_url)
