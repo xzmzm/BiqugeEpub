@@ -464,19 +464,20 @@ def get_book_details(html_content, book_url, site_config, logger=None): # Added 
     logger.info(f"Cover Image URL: {cover_image_url}")
     return title, author, description, cover_image_url
 
-def get_chapter_links(index_html, book_url, site_config):
+def get_chapter_links(index_html, book_url, site_config, logger=None):
     """Extracts chapter links and titles. Handles HTML parsing or POST JSON fetching."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     chapters = []
     base_site_url = site_config.get("base_url", book_url)
 
     # --- Handle POST JSON method (e.g., ixdzs8.com) ---
     if site_config.get("chapter_list_method") == "post_json":
-        logging.info("Fetching chapter list via POST JSON method.")
+        logger.info("Fetching chapter list via POST JSON method.")
         post_url_template = site_config.get("chapter_list_url_template")
         payload_key = site_config.get("chapter_list_payload_key", "bid") # Default to 'bid'
 
         if not post_url_template:
-            logging.error("Missing 'chapter_list_url_template' in site config for POST JSON.")
+            logger.error("Missing 'chapter_list_url_template' in site config for POST JSON.")
             return []
 
         try:
@@ -490,12 +491,12 @@ def get_chapter_links(index_html, book_url, site_config):
             post_data = {payload_key: book_id}
 
             # Use fetch_url with POST method
-            json_response = fetch_url(post_url, method='POST', data=post_data)
+            json_response = fetch_url(post_url, method='POST', data=post_data, logger=logger)
 
             if json_response and isinstance(json_response, dict) and json_response.get("rs") == 200:
                 chapter_list_data = json_response.get("data", [])
                 if not isinstance(chapter_list_data, list):
-                     logging.error(f"Unexpected data format in JSON response: 'data' is not a list. Response: {json_response}")
+                     logger.error(f"Unexpected data format in JSON response: 'data' is not a list. Response: {json_response}")
                      return []
 
                 seen_urls = set()
@@ -510,26 +511,26 @@ def get_chapter_links(index_html, book_url, site_config):
                                 chapters.append({'title': title, 'url': chapter_url})
                                 seen_urls.add(chapter_url)
                             else:
-                                logging.debug(f"Skipping duplicate chapter URL from JSON: {chapter_url}")
+                                logger.debug(f"Skipping duplicate chapter URL from JSON: {chapter_url}")
                         else:
-                            logging.warning(f"Skipping invalid chapter data from JSON: {item}")
-                logging.info(f"Found {len(chapters)} chapter links from JSON POST.")
+                            logger.warning(f"Skipping invalid chapter data from JSON: {item}")
+                logger.info(f"Found {len(chapters)} chapter links from JSON POST.")
                 # Note: JSON list is usually already in correct order, no reversal needed.
                 return chapters
             else:
-                logging.error(f"Failed to fetch or parse chapter list JSON from {post_url}. Response: {json_response}")
+                logger.error(f"Failed to fetch or parse chapter list JSON from {post_url}. Response: {json_response}")
                 return []
 
         except (ValueError, KeyError, AttributeError, requests.exceptions.RequestException) as e:
-            logging.error(f"Error fetching/processing chapter list via POST JSON: {e}")
+            logger.error(f"Error fetching/processing chapter list via POST JSON: {e}")
             return []
 
     # --- Handle HTML Parsing Method (default) ---
-    logging.info("Fetching chapter list via HTML parsing method.")
+    logger.info("Fetching chapter list via HTML parsing method.")
     # Explicitly use encoding hint from site_config for parsing, if available
     site_encoding = site_config.get('encoding')
     if site_encoding:
-        logging.debug(f"Using encoding hint for BeautifulSoup in get_chapter_links: {site_encoding}")
+        logger.debug(f"Using encoding hint for BeautifulSoup in get_chapter_links: {site_encoding}")
         soup = BeautifulSoup(index_html, 'html.parser', from_encoding=site_encoding)
     else:
         soup = BeautifulSoup(index_html, 'html.parser') # Default parser if no hint
@@ -544,7 +545,7 @@ def get_chapter_links(index_html, book_url, site_config):
             if isinstance(selector, str): return soup_obj.select_one(selector)
             elif isinstance(selector, tuple): return soup_obj.find(selector[0], selector[1])
         except Exception as e:
-            logging.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
+            logger.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
         return None
 
     # Find the chapter list container
@@ -555,7 +556,7 @@ def get_chapter_links(index_html, book_url, site_config):
     # Check if a container was found *if* one was expected.
     # If a container was expected but not found, log an error, but still allow fallback attempts below.
     if container_selector is not None and not chapter_list_container:
-        logging.warning(f"Expected chapter list container not found using selectors: {container_selector}, {container_fallback_selector}. Will attempt fallback link selection.")
+        logger.warning(f"Expected chapter list container not found using selectors: {container_selector}, {container_fallback_selector}. Will attempt fallback link selection.")
 
     # --- Select Links based on Config ---
     links_elements = []
@@ -568,9 +569,9 @@ def get_chapter_links(index_html, book_url, site_config):
     # Apply the site-specific link selector within the search area
     try:
         links_elements = search_area.select(link_selector)
-        logging.debug(f"Found {len(links_elements)} link elements using selector '{link_selector}' in {'container' if chapter_list_container else 'soup'}.")
+        logger.debug(f"Found {len(links_elements)} link elements using selector '{link_selector}' in {'container' if chapter_list_container else 'soup'}.")
     except Exception as e:
-        logging.error(f"Error applying link selector '{link_selector}': {e}")
+        logger.error(f"Error applying link selector '{link_selector}': {e}")
         links_elements = []
 
     # Note: The complex logic involving skip_dt_count and dl/dd tags (previously lines 577-605)
@@ -581,7 +582,7 @@ def get_chapter_links(index_html, book_url, site_config):
 
     # After all attempts, check if links were found
     if not links_elements:
-        logging.error("Failed to find any chapter links after all selection attempts.")
+        logger.error("Failed to find any chapter links after all selection attempts.")
         return []
 
     # --- Process Selected Links ---
@@ -603,7 +604,7 @@ def get_chapter_links(index_html, book_url, site_config):
             # Additional filter: check if URL path looks like a chapter
             is_likely_chapter = False
             try:
-                path = requests.utils.urlparse(full_url).path
+                path = urllib.parse.urlparse(full_url).path # Use urllib.parse consistently
                 # Common patterns: /book_id/chapter_id.html, /txt/book_id/chapter_id, /read/book_id/chapter_id/, /digits/digits.html etc.
                 # Updated regex to handle bqg5 structure like /1_1529/457152.html
                 if re.search(r'/\d+/\d+(?:\.html)?$', path) or \
@@ -629,7 +630,7 @@ def get_chapter_links(index_html, book_url, site_config):
                 if "dxmwx.org" in site_config.get("base_url", ""):
                     parent_span = link.find_parent('span')
                     if parent_span and "最新章节：" in parent_span.get_text():
-                        logging.debug(f"Skipping latest chapter link in header: {title} ({full_url})")
+                        logger.debug(f"Skipping latest chapter link in header: {title} ({full_url})")
                         continue # Skip this link
 
                 # --- General processing ---
@@ -641,13 +642,13 @@ def get_chapter_links(index_html, book_url, site_config):
                 chapters.append({'title': title, 'url': full_url})
                 seen_urls.add(full_url)
             else: # DEBUG: Log why a link was skipped
-                logging.debug(f"Skipping link: Title='{title}', Href='{href}', LikelyChapter={is_likely_chapter}, Seen={full_url in seen_urls}")
+                logger.debug(f"Skipping link: Title='{title}', Href='{href}', LikelyChapter={is_likely_chapter}, Seen={full_url in seen_urls}")
 
-    logging.info(f"Found {len(chapters)} potential chapter links.")
-    logging.debug(f"Final chapter list before return: {[c['title'] for c in chapters[:5]]}...") # DEBUG first 5 titles
+    logger.info(f"Found {len(chapters)} potential chapter links.")
+    logger.debug(f"Final chapter list before return: {[c['title'] for c in chapters[:5]]}...") # DEBUG first 5 titles
     # Reverse chapter order for sites that list newest first (like 69shuba)
     if "69shuba.com" in site_config.get("base_url", ""):
-         logging.info("Reversing chapter order for 69shuba.com.")
+         logger.info("Reversing chapter order for 69shuba.com.")
          chapters.reverse()
     return chapters
 
@@ -671,6 +672,7 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
         tuple (bytes, str) or None: If return_bytes is True, returns (epub_content, epub_filename).
                                     Otherwise, returns None.
     """
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     book = epub.EpubBook()
 
     # Set metadata
@@ -687,7 +689,7 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
     cover_image_content = None
     cover_item = None
     if cover_image_url:
-        logging.info(f"Attempting to download cover image: {cover_image_url}")
+        logger.info(f"Attempting to download cover image: {cover_image_url}")
         try:
             img_response = requests.get(cover_image_url, headers=HEADERS, timeout=30, stream=True)
             img_response.raise_for_status()
@@ -699,9 +701,9 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
             cover_item = epub.EpubItem(uid='cover_image', file_name=f'cover.{mimetypes.guess_extension(img_mimetype) or ".jpg"}', media_type=img_mimetype, content=cover_image_content)
             book.add_item(cover_item)
             book.set_cover(cover_item.file_name, cover_image_content) # Use set_cover for better compatibility
-            logging.info(f"Cover image downloaded and added ({img_mimetype}).")
+            logger.info(f"Cover image downloaded and added ({img_mimetype}).")
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not download or add cover image: {e}")
+            logger.warning(f"Could not download or add cover image: {e}")
 
     # Create chapters and add to book
     epub_chapters = []
@@ -762,7 +764,7 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
         epub_chapters.append(epub_chapter)
         # Add chapter to TOC
         toc.append(epub.Link(file_name, chapter_title, f'chap_{i+1:04d}'))
-        logging.info(f"Added chapter {i+1}: {chapter_title}")
+        logger.info(f"Added chapter {i+1}: {chapter_title}")
 
     # Define Table of Contents (including title page link if desired)
     # book.toc = (epub.Link('title_page.xhtml', 'Title Page', 'titlepage'), (epub.Section('Chapters'), tuple(toc)))
@@ -862,10 +864,10 @@ p {
                 temp_epub.seek(0)
                 epub_content = temp_epub.read()
             os.unlink(temp_epub.name) # Clean up the temporary file
-            logging.info(f"EPUB '{output_filename}' created in memory ({len(epub_content)} bytes).")
+            logger.info(f"EPUB '{output_filename}' created in memory ({len(epub_content)} bytes).")
             return epub_content, output_filename
         except Exception as e:
-            logging.error(f"Error writing EPUB to memory buffer: {e}")
+            logger.error(f"Error writing EPUB to memory buffer: {e}")
             # Attempt to clean up temp file if it exists and writing failed partially
             if 'temp_epub' in locals() and temp_epub and os.path.exists(temp_epub.name):
                 try:
@@ -880,10 +882,10 @@ p {
         output_path = os.path.join(target_output_dir, output_filename)
         try:
             epub.write_epub(output_path, book, {})
-            logging.info(f"\nEPUB created successfully: {output_path}")
+            logger.info(f"\nEPUB created successfully: {output_path}")
             return None # Indicate success, no bytes returned
         except Exception as e:
-            logging.error(f"Error writing EPUB file to disk: {e}")
+            logger.error(f"Error writing EPUB file to disk: {e}")
             raise # Re-raise the exception
 
 import os
@@ -954,7 +956,7 @@ def handle_fcgi_request():
 
         # Fetch metadata and chapter list (similar to CLI logic)
         # Pass the default logger for FCGI mode
-        logger = logging.getLogger()
+        logger = logging.getLogger() # Get default logger for FCGI
         index_html, metadata_html, metadata_url, chapter_list_fetch_url = fetch_initial_pages(url, site_config, logger=logger)
         if not index_html or not metadata_html:
              raise ConnectionError("Failed to fetch necessary pages.")
@@ -999,9 +1001,11 @@ def handle_fcgi_request():
         print()
         print(f"Error generating EPUB: {e}")
 
-# --- Helper function to consolidate initial page fetching for FCGI ---
-def fetch_initial_pages_fcgi(book_url, site_config):
+# --- Helper function to consolidate initial page fetching ---
+# Renamed from fetch_initial_pages_fcgi
+def fetch_initial_pages(book_url, site_config, logger=None):
     """Fetches initial index/metadata pages based on site config. Returns tuple."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     index_html = None
     metadata_html = None
     metadata_url = book_url
@@ -1011,7 +1015,7 @@ def fetch_initial_pages_fcgi(book_url, site_config):
         try:
             book_id_match = re.search(r'/(?:book|txt|info|read|chapter)/(\d+)', book_url)
             if not book_id_match:
-                path_part = requests.utils.urlparse(book_url).path
+                path_part = urllib.parse.urlparse(book_url).path # Use urllib.parse consistently
                 book_id_match = re.search(r'/(\d+)/?$', path_part)
                 if not book_id_match:
                     book_id_match = re.search(r'_(\d+)', book_url)
@@ -1025,24 +1029,24 @@ def fetch_initial_pages_fcgi(book_url, site_config):
                  raise ValueError("Missing 'metadata_url_template' or 'chapter_list_url_template' in site config")
 
             metadata_url = metadata_url_template.format(base_url=site_config['base_url'], book_id=book_id)
-            logging.info(f"Fetching metadata page: {metadata_url}")
-            metadata_html = fetch_url(metadata_url)
+            logger.info(f"Fetching metadata page: {metadata_url}")
+            metadata_html = fetch_url(metadata_url, logger=logger)
             if not metadata_html:
                  raise ConnectionError(f"Failed to fetch metadata page: {metadata_url}")
 
             chapter_list_fetch_url = chapter_list_url_template.format(base_url=site_config['base_url'], book_id=book_id)
-            logging.info(f"Fetching chapter list page: {chapter_list_fetch_url}")
-            index_html = fetch_url(chapter_list_fetch_url)
+            logger.info(f"Fetching chapter list page: {chapter_list_fetch_url}")
+            index_html = fetch_url(chapter_list_fetch_url, logger=logger)
             if not index_html:
                  raise ConnectionError(f"Failed to fetch chapter list page: {chapter_list_fetch_url}")
 
         except (ValueError, ConnectionError, KeyError, AttributeError) as e:
-             logging.error(f"Error preparing URLs or fetching initial pages for {site_config['base_url']}: {e}")
+             logger.error(f"Error preparing URLs or fetching initial pages for {site_config['base_url']}: {e}")
              raise # Re-raise the exception to be caught by the main handler
     else:
         # Metadata and chapters on the same page
-        logging.info(f"Fetching book index/metadata page: {book_url}")
-        index_html = fetch_url(book_url)
+        logger.info(f"Fetching book index/metadata page: {book_url}")
+        index_html = fetch_url(book_url, logger=logger)
         metadata_html = index_html
         metadata_url = book_url
         chapter_list_fetch_url = book_url # Chapter list is fetched from the main URL
@@ -1050,8 +1054,9 @@ def fetch_initial_pages_fcgi(book_url, site_config):
     return index_html, metadata_html, metadata_url, chapter_list_fetch_url
 
 # --- Helper function to consolidate chapter range filtering ---
-def filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num):
+def filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num, logger=None):
     """Filters chapter links based on start/end numbers."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     original_chapter_count = len(chapter_links)
     if original_chapter_count == 0:
         return []
@@ -1061,33 +1066,34 @@ def filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num):
 
     # Validate indices
     if start_index < 0:
-        logging.warning(f"Start chapter {start_chapter_num} is invalid. Using chapter 1.")
+        logger.warning(f"Start chapter {start_chapter_num} is invalid. Using chapter 1.")
         start_index = 0
     if end_index > original_chapter_count:
-        logging.warning(f"End chapter {end_chapter_num} is greater than total chapters ({original_chapter_count}). Using last chapter.")
+        logger.warning(f"End chapter {end_chapter_num} is greater than total chapters ({original_chapter_count}). Using last chapter.")
         end_index = original_chapter_count
     if start_index >= end_index:
-         logging.warning(f"Start chapter ({start_chapter_num}) is greater than or equal to end chapter ({end_chapter_num}). Only processing chapter {start_chapter_num}.")
+         logger.warning(f"Start chapter ({start_chapter_num}) is greater than or equal to end chapter ({end_chapter_num}). Only processing chapter {start_chapter_num}.")
          end_index = start_index + 1 # Ensure at least the start chapter is included
 
     # Slice the chapter list
     if start_index > 0 or end_index < original_chapter_count:
-         logging.info(f"Selecting chapters from {start_index + 1} to {end_index} (inclusive).")
+         logger.info(f"Selecting chapters from {start_index + 1} to {end_index} (inclusive).")
          return chapter_links[start_index:end_index]
     else:
-         logging.info(f"Selecting all {original_chapter_count} chapters.")
+         logger.info(f"Selecting all {original_chapter_count} chapters.")
          return chapter_links
 
 # --- Helper function to consolidate chapter content fetching ---
-def fetch_chapters_content(chapter_links, site_config):
+def fetch_chapters_content(chapter_links, site_config, logger=None):
     """Fetches and cleans content for a list of chapter links."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     chapters_content_data = []
     total_chapters = len(chapter_links)
-    logging.info(f"Attempting to fetch content for {total_chapters} chapters...")
+    logger.info(f"Attempting to fetch content for {total_chapters} chapters...")
 
     for i, chapter_info in enumerate(chapter_links):
-        logging.info(f"Processing chapter {i+1}/{total_chapters}: {chapter_info['title']} ({chapter_info['url']})")
-        chapter_html_page = fetch_url(chapter_info['url'])
+        logger.info(f"Processing chapter {i+1}/{total_chapters}: {chapter_info['title']} ({chapter_info['url']})")
+        chapter_html_page = fetch_url(chapter_info['url'], logger=logger)
         if chapter_html_page:
             soup = BeautifulSoup(chapter_html_page, 'html.parser')
             content_div = None
@@ -1099,32 +1105,26 @@ def fetch_chapters_content(chapter_links, site_config):
                      elif isinstance(selector_info, str):
                           content_div = soup.select_one(selector_info)
                      if content_div:
-                         logging.debug(f"Found content container using: {selector_info}")
+                         logger.debug(f"Found content container using: {selector_info}")
                          break
                  except Exception as e:
-                     logging.warning(f"Error applying content selector {selector_info}: {e}")
+                     logger.warning(f"Error applying content selector {selector_info}: {e}")
                      continue
 
             if content_div:
-                cleaned_content_html = clean_html_content(content_div, site_config)
+                cleaned_content_html = clean_html_content(content_div, site_config, logger=logger)
                 if cleaned_content_html:
                     chapters_content_data.append({
                         'title': chapter_info['title'],
                         'content_html': cleaned_content_html
                     })
                 else:
-                    logging.warning(f"Content div found but no text extracted for chapter: {chapter_info['title']}")
+                    logger.warning(f"Content div found but no text extracted for chapter: {chapter_info['title']}")
             else:
-                logging.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']} using selectors {content_selectors}")
+                logger.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']} using selectors {content_selectors}")
         else:
-            logging.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
+            logger.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
     return chapters_content_data
-
-
-# --- Task Management (for Async Server) ---
-tasks = {} # Dictionary to store task status and results
-tasks_lock = threading.Lock() # Lock for thread-safe access to tasks dictionary
-TASK_TIMEOUT = timedelta(hours=1) # How long to keep task results
 
 # --- Local Development Server ---
 
@@ -1200,7 +1200,7 @@ class EpubRequestHandler(SimpleHTTPRequestHandler):
                 raise ValueError(f"Unsupported website URL: {url}")
 
             # Fetch pages (using the same helper as FCGI)
-            index_html, metadata_html, metadata_url, chapter_list_fetch_url = fetch_initial_pages_fcgi(url, site_config)
+            index_html, metadata_html, metadata_url, chapter_list_fetch_url = fetch_initial_pages(url, site_config)
             if not index_html or not metadata_html:
                  raise ConnectionError("Failed to fetch necessary pages.")
 

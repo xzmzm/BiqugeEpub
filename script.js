@@ -70,13 +70,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 let filename = "generated_book.epub"; // Default filename
                 const disposition = response.headers.get('Content-Disposition');
                 if (disposition && disposition.includes('attachment')) {
-                    const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-                    const matches = filenameRegex.exec(disposition);
-                    if (matches != null && matches[1]) {
-                        filename = matches[1].replace(/['"]/g, '');
+                    // Try to extract filename* (RFC 5987)
+                    const filenameStarRegex = /filename\*=UTF-8''([^;]+)/i;
+                    const starMatches = filenameStarRegex.exec(disposition);
+                    if (starMatches && starMatches[1]) {
+                        try {
+                            filename = decodeURIComponent(starMatches[1]);
+                        } catch (e) {
+                            logMessage(`Error decoding filename*: ${e}`, true);
+                            // Fallback to simple filename if decoding fails
+                            const filenameRegex = /filename="?([^";]+)"?/i;
+                            const matches = filenameRegex.exec(disposition);
+                            if (matches && matches[1]) {
+                                filename = matches[1];
+                            }
+                        }
+                    } else {
+                        // Fallback to simple filename if filename* is not found
+                        const filenameRegex = /filename="?([^";]+)"?/i;
+                        const matches = filenameRegex.exec(disposition);
+                        if (matches && matches[1]) {
+                            filename = matches[1];
+                        }
                     }
                 }
-                logMessage(`Filename: ${filename}`);
+                logMessage(`Filename: ${filename}`); // Should now log the correct filename
 
                 // Get EPUB data as a Blob
                 const epubBlob = await response.blob();
