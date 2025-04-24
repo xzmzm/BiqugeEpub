@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biquge EPUB Creator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Biquge EPUB Creator</h1>
+
+    <form id="epub-form">
+        <div class="form-group">
+            <label for="url">Book Index URL:</label>
+            <input type="url" id="url" name="url" required placeholder="e.g., https://www.bqg5.com/0_521/">
+        </div>
+        <div class="form-group">
+            <label for="start">Start Chapter (optional):</label>
+            <input type="number" id="start" name="start" min="1" placeholder="Default: 1">
+        </div>
+        <div class="form-group">
+            <label for="end">End Chapter (optional):</label>
+            <input type="number" id="end" name="end" min="1" placeholder="Default: Last">
+        </div>
+        <button type="submit" id="submit-btn">Generate EPUB</button>
+    </form>
+
+    <div id="status-area">
+        <h2>Status</h2>
+        <pre id="logs"></pre>
+        <div id="download-link-area"></div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -9,6 +9,11 @@ import logging
 import mimetypes # Added for guessing image type
 import sys # For exit
 import json # Added for handling JSON chapter lists
+# import cgi # For FCGI handling (REPLACED with os/urllib.parse)
+import io # For in-memory file handling
+import tempfile # For temporary file creation
+from http.server import SimpleHTTPRequestHandler, HTTPServer # For dev server
+import urllib.parse # For parsing URL in dev server
 # --- Configuration ---
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -184,55 +189,57 @@ SITE_CONFIGS = {
     }
 }
 
-def get_site_config(url):
+def get_site_config(url, logger=None):
     """Determines the site config based on the URL."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     for domain, config in SITE_CONFIGS.items():
         # Check if the domain is present in the URL's netloc
         try:
-            parsed_url = requests.utils.urlparse(url)
+            parsed_url = urllib.parse.urlparse(url) # Use urllib.parse consistently
             if domain in parsed_url.netloc:
-                logging.info(f"Detected site: {domain}")
+                logger.info(f"Detected site: {domain}")
                 return config
         except Exception as e:
-            logging.warning(f"URL parsing failed for {url}: {e}. Trying simple string search.")
+            logger.warning(f"URL parsing failed for {url}: {e}. Trying simple string search.")
             # Fallback to simple string search if parsing fails
             if domain in url:
-                logging.info(f"Detected site (fallback): {domain}")
+                logger.info(f"Detected site (fallback): {domain}")
                 return config
 
-    logging.warning(f"Could not determine site configuration for URL: {url}. No supported domain found.")
+    logger.warning(f"Could not determine site configuration for URL: {url}. No supported domain found.")
     return None # Return None if no config found
 
 # --- Helper Functions ---
 # --- Helper Functions ---
 
-def fetch_url(url, method='GET', data=None):
+def fetch_url(url, method='GET', data=None, logger=None):
     """Fetches content from a URL with retries and delay, supporting GET and POST."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     retries = 0
     while retries < MAX_RETRIES:
         try:
             if method.upper() == 'POST':
-                logging.debug(f"Making POST request to {url} with data: {data}")
+                logger.debug(f"Making POST request to {url} with data: {data}")
                 response = requests.post(url, headers=HEADERS, data=data, timeout=30)
             else: # Default to GET
-                logging.debug(f"Making GET request to {url}")
+                logger.debug(f"Making GET request to {url}")
                 response = requests.get(url, headers=HEADERS, timeout=30)
 
             response.raise_for_status() # Raise an exception for bad status codes
 
             # Handle JSON response directly for POST requests expecting JSON
             if method.upper() == 'POST' and 'application/json' in response.headers.get('Content-Type', ''):
-                logging.info(f"Fetched JSON: {url} (Status: {response.status_code})")
+                logger.info(f"Fetched JSON: {url} (Status: {response.status_code})")
                 time.sleep(REQUEST_DELAY)
                 try:
                     return response.json() # Return parsed JSON object
-                except json.JSONDecodeError as e:
-                    logging.error(f"Failed to decode JSON response from {url}: {e}")
+                except requests.exceptions.JSONDecodeError as e: # Use requests' exception
+                    logger.error(f"Failed to decode JSON response from {url}: {e}")
                     return None # Indicate JSON decode failure
 
             # --- HTML Response Handling ---
             # Try to detect encoding, fallback to site config hint or utf-8
-            site_config = get_site_config(url) # Get config again for encoding hint
+            site_config = get_site_config(url, logger=logger) # Get config again for encoding hint, pass logger
             fallback_encoding = site_config.get('encoding', 'utf-8') if site_config else 'utf-8'
             detected_encoding = response.apparent_encoding if response.apparent_encoding else fallback_encoding
             response.encoding = detected_encoding
@@ -245,28 +252,29 @@ def fetch_url(url, method='GET', data=None):
             try:
                 text_preview = response.text[:2000]
                 if '�' in text_preview:
-                    logging.warning(f"Garbled characters detected with encoding {detected_encoding} for {url}. Forcing {fallback_encoding}.")
+                    logger.warning(f"Garbled characters detected with encoding {detected_encoding} for {url}. Forcing {fallback_encoding}.")
                     response.encoding = fallback_encoding
             except Exception as e:
-                logging.warning(f"Could not check for garbled characters: {e}")
+                logger.warning(f"Could not check for garbled characters: {e}")
 
-            logging.info(f"Fetched HTML: {url} (Status: {response.status_code}, Encoding: {response.encoding})")
+            logger.info(f"Fetched HTML: {url} (Status: {response.status_code}, Encoding: {response.encoding})")
             time.sleep(REQUEST_DELAY)
             return response.text # Return HTML text
         except requests.exceptions.Timeout:
             retries += 1
-            logging.warning(f"Timeout fetching {url}. Retrying ({retries}/{MAX_RETRIES})...")
+            logger.warning(f"Timeout fetching {url}. Retrying ({retries}/{MAX_RETRIES})...")
             time.sleep(2 ** retries) # Exponential backoff
         except requests.exceptions.RequestException as e:
             retries += 1
-            logging.warning(f"Error fetching {url}: {e}. Retrying ({retries}/{MAX_RETRIES})...")
+            logger.warning(f"Error fetching {url}: {e}. Retrying ({retries}/{MAX_RETRIES})...")
             time.sleep(2 ** retries) # Exponential backoff
 
-    logging.error(f"Failed to fetch {url} after {MAX_RETRIES} retries.")
+    logger.error(f"Failed to fetch {url} after {MAX_RETRIES} retries.")
     return None
 
-def clean_html_content(content_container_tag, site_config): # Changed parameter, added site_config
+def clean_html_content(content_container_tag, site_config, logger=None): # Changed parameter, added site_config
     """Removes unwanted tags and cleans up chapter text for EPUB HTML."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     if not content_container_tag:
         return ""
 
@@ -275,7 +283,7 @@ def clean_html_content(content_container_tag, site_config): # Changed parameter,
     tag_copy = BeautifulSoup(str(content_container_tag), 'html.parser').find(content_container_tag.name, recursive=False, attrs=content_container_tag.attrs)
     # Handle case where find returns None
     if not tag_copy:
-        logging.warning("Failed to parse content container tag copy.")
+        logger.warning("Failed to parse content container tag copy.")
         # Fallback to using the original tag, but this might modify the main soup
         tag_copy = content_container_tag
 
@@ -308,7 +316,7 @@ def clean_html_content(content_container_tag, site_config): # Changed parameter,
             try:
                 cleaned_line = re.sub(pattern, '', cleaned_line, flags=re.IGNORECASE)
             except re.error as e:
-                logging.warning(f"Invalid regex pattern in site config: {pattern} - {e}")
+                logger.warning(f"Invalid regex pattern in site config: {pattern} - {e}")
 
         # General cleanup (remove multiple spaces)
         cleaned_line = re.sub(r'\s{2,}', ' ', cleaned_line).strip()
@@ -332,8 +340,9 @@ def clean_html_content(content_container_tag, site_config): # Changed parameter,
 
 # --- Main Logic ---
 
-def get_book_details(html_content, book_url, site_config): # Added site_config, changed html source name
+def get_book_details(html_content, book_url, site_config, logger=None): # Added site_config, changed html source name
     """Extracts book title, author, description, and cover image URL from the relevant page."""
+    if logger is None: logger = logging.getLogger() # Use default logger if none provided
     soup = BeautifulSoup(html_content, 'html.parser')
     selectors = site_config['metadata_selectors']
 
@@ -350,7 +359,7 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
             elif isinstance(selector, tuple) and len(selector) == 1: # Assume (tag_name,)
                 return soup_obj.find(selector[0])
         except Exception as e:
-            logging.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
+            logger.warning(f"Error applying selector '{selector_key}' ({selector}): {e}")
         return None
 
     # Helper to get content/text
@@ -360,7 +369,7 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
             if attr and tag.has_attr(attr): return tag[attr].strip()
             return tag.text.strip()
         except Exception as e:
-            logging.warning(f"Error getting content/attribute '{attr}' from tag {tag}: {e}")
+            logger.warning(f"Error getting content/attribute '{attr}' from tag {tag}: {e}")
         return None
     # Title
     title = get_content(find_element('title_meta')) or get_content(find_element('title_fallback'), attr=None) or "Unknown Title"
@@ -386,7 +395,7 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
                       if author_link:
                           author = author_link.text.strip()
                           found = True
-                          logging.debug(f"Found author using author_link_selector: {author}")
+                          logger.debug(f"Found author using author_link_selector: {author}")
 
              # Fallback 1: Search common tags like <p> for the label
              if not found:
@@ -400,7 +409,7 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
                               author = tag.find('a').text.strip()
                           if author: # Found author in this tag
                               found = True
-                              logging.debug(f"Found author using fallback 1 (p/div/span): {author}")
+                              logger.debug(f"Found author using fallback 1 (p/div/span): {author}")
                               break
 
              # Fallback 2: Search the entire container text using regex
@@ -411,7 +420,7 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
                  if match:
                      author = match.group(1).strip()
                      found = True
-                     logging.debug(f"Found author using fallback 2 (regex): {author}")
+                     logger.debug(f"Found author using fallback 2 (regex): {author}")
 
     author = author or "Unknown Author"
 
@@ -443,16 +452,16 @@ def get_book_details(html_content, book_url, site_config): # Added site_config, 
              cover_image_url = requests.compat.urljoin(base_site_url, cover_image_src)
         # If still not valid, set to None
         if not cover_image_url.startswith('http'):
-             logging.warning(f"Could not construct absolute cover URL from src: {cover_image_src}")
+             logger.warning(f"Could not construct absolute cover URL from src: {cover_image_src}")
              cover_image_url = None
 
     # Author fallback logic moved up
 
-    logging.info(f"Title: {title}")
-    logging.info(f"Author: {author}")
-    logging.info(f"Status: {status}")
-    logging.info(f"Description: {description[:100]}...") # Log first 100 chars
-    logging.info(f"Cover Image URL: {cover_image_url}")
+    logger.info(f"Title: {title}")
+    logger.info(f"Author: {author}")
+    logger.info(f"Status: {status}")
+    logger.info(f"Description: {description[:100]}...") # Log first 100 chars
+    logger.info(f"Cover Image URL: {cover_image_url}")
     return title, author, description, cover_image_url
 
 def get_chapter_links(index_html, book_url, site_config):
@@ -551,52 +560,24 @@ def get_chapter_links(index_html, book_url, site_config):
     # --- Select Links based on Config ---
     links_elements = []
     skip_dt_count = selectors.get('skip_dt_count', 0)
-    link_selector = selectors.get('link_selector', 'a') # Default to 'a'
+    link_selector = selectors.get('link_selector', 'a') # Default to 'a' if not specified
 
-    # Find the main chapter list container (div#list)
-    chapter_list_container = soup.find('div', {'id': 'list'})
+    # Use the container found via site config (or soup if no container specified)
+    search_area = chapter_list_container if chapter_list_container else soup
 
-    if not chapter_list_container:
-        logging.error("Main chapter list container (div#list) not found.")
-        return []
-    logging.debug(f"Found chapter list container: {chapter_list_container.name}#{chapter_list_container.get('id')}") # DEBUG
+    # Apply the site-specific link selector within the search area
+    try:
+        links_elements = search_area.select(link_selector)
+        logging.debug(f"Found {len(links_elements)} link elements using selector '{link_selector}' in {'container' if chapter_list_container else 'soup'}.")
+    except Exception as e:
+        logging.error(f"Error applying link selector '{link_selector}': {e}")
+        links_elements = []
 
-    # Find the dl tag within the list_div
-    dl_tag = chapter_list_container.find('dl')
-
-    if not dl_tag:
-        logging.error("DL tag within div#list not found.")
-        return []
-    logging.debug("Found DL tag within container.") # DEBUG
-
-    if skip_dt_count > 0:
-        # Logic for sites like bqg5 that need skipping based on <dt>
-        dt_elements = dl_tag.find_all('dt')
-        logging.debug(f"Found {len(dt_elements)} dt elements.") # DEBUG
-        if len(dt_elements) >= skip_dt_count:
-            target_dt = dt_elements[skip_dt_count - 1] # e.g., if skip_dt_count is 2, use the second dt (index 1)
-            logging.debug(f"Target DT ({skip_dt_count}): {target_dt.text[:50]}...") # DEBUG
-            # Find all dd siblings after the target dt
-            chapter_dd_siblings = target_dt.find_next_siblings('dd')
-            logging.debug(f"Found {len(list(chapter_dd_siblings))} dd siblings after target DT.") # DEBUG - Convert generator to list for count
-            # Re-iterate after counting
-            chapter_dd_siblings = target_dt.find_next_siblings('dd')
-            for dd_index, dd_element in enumerate(chapter_dd_siblings):
-                # Find the link within the dd element
-                link = dd_element.find('a')
-                if link:
-                    logging.debug(f"  Found link in dd {dd_index+1}: {link.get('href')} - {link.text.strip()}") # DEBUG
-                    links_elements.append(link)
-                else:
-                    logging.debug(f"  No link found in dd {dd_index+1}") # DEBUG
-        else:
-             # Fallback to selecting all links if dt structure not found as expected
-             logging.warning(f"Expected {skip_dt_count} <dt> elements for skipping, but found {len(dt_elements)}. Falling back to selecting all links within DL.")
-             links_elements = dl_tag.find_all('a') # Select all links within the dl
-             logging.debug(f"Fallback: Found {len(links_elements)} links directly within DL.") # DEBUG
-    else:
-        # Simpler logic for sites like 69shuba (or if no skipping needed)
-        links_elements = dl_tag.find_all('a') # Select all links within the dl
+    # Note: The complex logic involving skip_dt_count and dl/dd tags (previously lines 577-605)
+    # is removed as it was too specific to bqg5.com.
+    # If similar complex logic is needed for other sites, it should be handled
+    # via more sophisticated site-specific configurations or functions.
+    # For 69shuba, the simple `ul li a` selector applied to the container is sufficient.
 
     # After all attempts, check if links were found
     if not links_elements:
@@ -670,8 +651,26 @@ def get_chapter_links(index_html, book_url, site_config):
          chapters.reverse()
     return chapters
 
-def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory):
-    """Creates an EPUB file from the chapter data."""
+def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory, return_bytes=False, logger=None):
+    """
+    Creates an EPUB file from the chapter data.
+
+    Args:
+        title (str): Book title.
+        author (str): Book author.
+        description (str): Book description.
+        chapters_data (list): List of dicts, each with 'title' and 'content_html'.
+        book_url (str): Original URL of the book index/metadata page.
+        cover_image_url (str): URL of the cover image, or None.
+        output_directory (str or None): Directory to save the EPUB. If None and return_bytes is False, uses OUTPUT_DIR.
+                                        If None and return_bytes is True, EPUB is not saved to disk.
+        return_bytes (bool): If True, returns the EPUB content as bytes and the filename.
+                             If False, saves the EPUB to disk and returns None.
+
+    Returns:
+        tuple (bytes, str) or None: If return_bytes is True, returns (epub_content, epub_filename).
+                                    Otherwise, returns None.
+    """
     book = epub.EpubBook()
 
     # Set metadata
@@ -849,23 +848,441 @@ p {
     spine_items = ['nav', title_page] + epub_chapters
     book.spine = ['cover'] + spine_items if cover_item else spine_items
 
-    # Use the provided output directory or the default
-    target_output_dir = output_directory if output_directory else OUTPUT_DIR
-    # Create output directory if it doesn't exist
-    os.makedirs(target_output_dir, exist_ok=True)
-
     # Sanitize filename
     sanitized_title = re.sub(r'[\\/*?:"<>|]',"", title) # Remove invalid characters
-    sanitized_title = re.sub(r'\s+', '_', sanitized_title) # Replace spaces with underscores
+    sanitized_title = re.sub(r'\s+', '_', sanitized_title).strip('_') # Replace spaces and strip leading/trailing underscores
+    if not sanitized_title: sanitized_title = "Untitled_Book" # Handle empty titles after sanitization
     output_filename = OUTPUT_FILENAME_TEMPLATE.format(title=sanitized_title)
-    output_path = os.path.join(target_output_dir, output_filename)
 
-    # Save EPUB file
+    if return_bytes:
+        # Write EPUB to an in-memory buffer
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".epub") as temp_epub:
+                epub.write_epub(temp_epub.name, book, {})
+                temp_epub.seek(0)
+                epub_content = temp_epub.read()
+            os.unlink(temp_epub.name) # Clean up the temporary file
+            logging.info(f"EPUB '{output_filename}' created in memory ({len(epub_content)} bytes).")
+            return epub_content, output_filename
+        except Exception as e:
+            logging.error(f"Error writing EPUB to memory buffer: {e}")
+            # Attempt to clean up temp file if it exists and writing failed partially
+            if 'temp_epub' in locals() and temp_epub and os.path.exists(temp_epub.name):
+                try:
+                    os.unlink(temp_epub.name)
+                except OSError:
+                    pass # Ignore cleanup error if it happens
+            raise # Re-raise the exception to be handled by the caller
+    else:
+        # Save EPUB file to disk (original behavior)
+        target_output_dir = output_directory if output_directory else OUTPUT_DIR
+        os.makedirs(target_output_dir, exist_ok=True)
+        output_path = os.path.join(target_output_dir, output_filename)
+        try:
+            epub.write_epub(output_path, book, {})
+            logging.info(f"\nEPUB created successfully: {output_path}")
+            return None # Indicate success, no bytes returned
+        except Exception as e:
+            logging.error(f"Error writing EPUB file to disk: {e}")
+            raise # Re-raise the exception
+
+import os
+import urllib.parse
+
+def handle_fcgi_request():
+    """Handles incoming FCGI requests (parsing QUERY_STRING)."""
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - FCGI - %(levelname)s - %(message)s')
+    logging.info("FCGI request received.")
+
+    # Parse QUERY_STRING environment variable instead of using cgi.FieldStorage
+    query_string = os.environ.get('QUERY_STRING', '')
+    params = urllib.parse.parse_qs(query_string)
+    logging.debug(f"FCGI Query Params: {params}")
+
+    # Get values from parsed parameters (note: parse_qs returns lists)
+    url = params.get('url', [None])[0]
+    start_chapter = params.get('start', ['1'])[0] # Default to '1'
+    end_chapter = params.get('end', [None])[0] # Default to None
+
+    # --- Basic Input Validation ---
+    if not url:
+        print("Status: 400 Bad Request")
+        print("Content-Type: text/plain")
+        print()
+        print("Error: 'url' parameter is required.")
+        logging.error("FCGI Error: Missing 'url' parameter.")
+        return
+
     try:
-        epub.write_epub(output_path, book, {})
-        logging.info(f"\nEPUB created successfully: {output_path}")
+        start_chapter_num = int(start_chapter)
+        if start_chapter_num < 1: start_chapter_num = 1
+    except (ValueError, TypeError):
+        print("Status: 400 Bad Request")
+        print("Content-Type: text/plain")
+        print()
+        print("Error: 'start' parameter must be a positive integer.")
+        logging.error(f"FCGI Error: Invalid 'start' parameter: {start_chapter}")
+        return
+
+    end_chapter_num = None
+    if end_chapter is not None:
+        try:
+            end_chapter_num = int(end_chapter)
+            if end_chapter_num < start_chapter_num:
+                 print("Status: 400 Bad Request")
+                 print("Content-Type: text/plain")
+                 print()
+                 print("Error: 'end' chapter cannot be less than 'start' chapter.")
+                 logging.error(f"FCGI Error: 'end' chapter ({end_chapter}) less than 'start' ({start_chapter}).")
+                 return
+        except (ValueError, TypeError):
+            print("Status: 400 Bad Request")
+            print("Content-Type: text/plain")
+            print()
+            print("Error: 'end' parameter must be an integer.")
+            logging.error(f"FCGI Error: Invalid 'end' parameter: {end_chapter}")
+            return
+
+    logging.info(f"FCGI Params: url='{url}', start={start_chapter_num}, end={end_chapter_num}")
+
+    # --- Call Core Logic ---
+    try:
+        # Fetch site config based on URL
+        site_config = get_site_config(url)
+        if not site_config:
+            raise ValueError(f"Unsupported website URL: {url}")
+
+        # Fetch metadata and chapter list (similar to CLI logic)
+        # Pass the default logger for FCGI mode
+        logger = logging.getLogger()
+        index_html, metadata_html, metadata_url, chapter_list_fetch_url = fetch_initial_pages(url, site_config, logger=logger)
+        if not index_html or not metadata_html:
+             raise ConnectionError("Failed to fetch necessary pages.")
+
+        book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config, logger=logger)
+        chapter_links = get_chapter_links(index_html, chapter_list_fetch_url or url, site_config, logger=logger) # Use chapter list url if available
+
+        # Apply chapter range
+        chapter_links = filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num, logger=logger)
+
+        if not chapter_links:
+            raise ValueError("No chapters found for the specified range.")
+
+        # Fetch chapter content
+        chapters_content_data = fetch_chapters_content(chapter_links, site_config, logger=logger)
+        if not chapters_content_data:
+             raise ValueError("Failed to fetch content for any chapters.")
+
+        # Create EPUB in memory
+        epub_content, epub_filename = create_epub(
+            book_title, book_author, book_description, chapters_content_data,
+            metadata_url, cover_url, output_directory=None, return_bytes=True, logger=logger # Request bytes
+        )
+
+        # --- Send Response ---
+        print(f"Content-Disposition: attachment; filename=\"{epub_filename}\"")
+        print("Content-Type: application/epub+zip")
+        print(f"Content-Length: {len(epub_content)}")
+        print("Status: 200 OK") # Optional, but good practice
+        print() # End of headers
+
+        # Write EPUB bytes to stdout
+        # Need to flush stdout and potentially write in binary mode
+        sys.stdout.buffer.write(epub_content)
+        sys.stdout.buffer.flush()
+        logging.info(f"Successfully sent EPUB: {epub_filename}")
+
     except Exception as e:
-        logging.error(f"Error writing EPUB file: {e}")
+        logging.exception("FCGI Error during EPUB generation:") # Log traceback
+        print("Status: 500 Internal Server Error")
+        print("Content-Type: text/plain")
+        print()
+        print(f"Error generating EPUB: {e}")
+
+# --- Helper function to consolidate initial page fetching for FCGI ---
+def fetch_initial_pages_fcgi(book_url, site_config):
+    """Fetches initial index/metadata pages based on site config. Returns tuple."""
+    index_html = None
+    metadata_html = None
+    metadata_url = book_url
+    chapter_list_fetch_url = None # URL used to fetch the chapter list
+
+    if site_config.get('needs_metadata_fetch', False):
+        try:
+            book_id_match = re.search(r'/(?:book|txt|info|read|chapter)/(\d+)', book_url)
+            if not book_id_match:
+                path_part = requests.utils.urlparse(book_url).path
+                book_id_match = re.search(r'/(\d+)/?$', path_part)
+                if not book_id_match:
+                    book_id_match = re.search(r'_(\d+)', book_url)
+            if not book_id_match:
+                raise ValueError("Could not extract book ID from URL for metadata lookup")
+
+            book_id = book_id_match.group(1)
+            metadata_url_template = site_config.get('metadata_url_template')
+            chapter_list_url_template = site_config.get('chapter_list_url_template')
+            if not metadata_url_template or not chapter_list_url_template:
+                 raise ValueError("Missing 'metadata_url_template' or 'chapter_list_url_template' in site config")
+
+            metadata_url = metadata_url_template.format(base_url=site_config['base_url'], book_id=book_id)
+            logging.info(f"Fetching metadata page: {metadata_url}")
+            metadata_html = fetch_url(metadata_url)
+            if not metadata_html:
+                 raise ConnectionError(f"Failed to fetch metadata page: {metadata_url}")
+
+            chapter_list_fetch_url = chapter_list_url_template.format(base_url=site_config['base_url'], book_id=book_id)
+            logging.info(f"Fetching chapter list page: {chapter_list_fetch_url}")
+            index_html = fetch_url(chapter_list_fetch_url)
+            if not index_html:
+                 raise ConnectionError(f"Failed to fetch chapter list page: {chapter_list_fetch_url}")
+
+        except (ValueError, ConnectionError, KeyError, AttributeError) as e:
+             logging.error(f"Error preparing URLs or fetching initial pages for {site_config['base_url']}: {e}")
+             raise # Re-raise the exception to be caught by the main handler
+    else:
+        # Metadata and chapters on the same page
+        logging.info(f"Fetching book index/metadata page: {book_url}")
+        index_html = fetch_url(book_url)
+        metadata_html = index_html
+        metadata_url = book_url
+        chapter_list_fetch_url = book_url # Chapter list is fetched from the main URL
+
+    return index_html, metadata_html, metadata_url, chapter_list_fetch_url
+
+# --- Helper function to consolidate chapter range filtering ---
+def filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num):
+    """Filters chapter links based on start/end numbers."""
+    original_chapter_count = len(chapter_links)
+    if original_chapter_count == 0:
+        return []
+
+    start_index = start_chapter_num - 1
+    end_index = end_chapter_num if end_chapter_num is not None else original_chapter_count
+
+    # Validate indices
+    if start_index < 0:
+        logging.warning(f"Start chapter {start_chapter_num} is invalid. Using chapter 1.")
+        start_index = 0
+    if end_index > original_chapter_count:
+        logging.warning(f"End chapter {end_chapter_num} is greater than total chapters ({original_chapter_count}). Using last chapter.")
+        end_index = original_chapter_count
+    if start_index >= end_index:
+         logging.warning(f"Start chapter ({start_chapter_num}) is greater than or equal to end chapter ({end_chapter_num}). Only processing chapter {start_chapter_num}.")
+         end_index = start_index + 1 # Ensure at least the start chapter is included
+
+    # Slice the chapter list
+    if start_index > 0 or end_index < original_chapter_count:
+         logging.info(f"Selecting chapters from {start_index + 1} to {end_index} (inclusive).")
+         return chapter_links[start_index:end_index]
+    else:
+         logging.info(f"Selecting all {original_chapter_count} chapters.")
+         return chapter_links
+
+# --- Helper function to consolidate chapter content fetching ---
+def fetch_chapters_content(chapter_links, site_config):
+    """Fetches and cleans content for a list of chapter links."""
+    chapters_content_data = []
+    total_chapters = len(chapter_links)
+    logging.info(f"Attempting to fetch content for {total_chapters} chapters...")
+
+    for i, chapter_info in enumerate(chapter_links):
+        logging.info(f"Processing chapter {i+1}/{total_chapters}: {chapter_info['title']} ({chapter_info['url']})")
+        chapter_html_page = fetch_url(chapter_info['url'])
+        if chapter_html_page:
+            soup = BeautifulSoup(chapter_html_page, 'html.parser')
+            content_div = None
+            content_selectors = site_config.get('chapter_content_selectors', {}).get('container', [])
+            for selector_info in content_selectors:
+                 try:
+                     if isinstance(selector_info, tuple) and len(selector_info) == 2:
+                          content_div = soup.find(selector_info[0], selector_info[1])
+                     elif isinstance(selector_info, str):
+                          content_div = soup.select_one(selector_info)
+                     if content_div:
+                         logging.debug(f"Found content container using: {selector_info}")
+                         break
+                 except Exception as e:
+                     logging.warning(f"Error applying content selector {selector_info}: {e}")
+                     continue
+
+            if content_div:
+                cleaned_content_html = clean_html_content(content_div, site_config)
+                if cleaned_content_html:
+                    chapters_content_data.append({
+                        'title': chapter_info['title'],
+                        'content_html': cleaned_content_html
+                    })
+                else:
+                    logging.warning(f"Content div found but no text extracted for chapter: {chapter_info['title']}")
+            else:
+                logging.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']} using selectors {content_selectors}")
+        else:
+            logging.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
+    return chapters_content_data
+
+
+# --- Task Management (for Async Server) ---
+tasks = {} # Dictionary to store task status and results
+tasks_lock = threading.Lock() # Lock for thread-safe access to tasks dictionary
+TASK_TIMEOUT = timedelta(hours=1) # How long to keep task results
+
+# --- Local Development Server ---
+
+class EpubRequestHandler(SimpleHTTPRequestHandler):
+    """Custom request handler to serve static files and handle EPUB generation."""
+
+    # Override log_message to potentially suppress standard request logging if desired
+    # def log_message(self, format, *args):
+    #     # Uncomment the line below to disable standard GET/POST logging
+    #     # return
+    #     super().log_message(format, *args)
+
+
+    def do_GET(self):
+        """Handle GET requests."""
+        parsed_path = urllib.parse.urlparse(self.path)
+        path = parsed_path.path
+        query = parsed_path.query
+
+        # Route EPUB generation requests
+        if path == '/generate-epub':
+            self.handle_epub_request(query)
+        # Route static file requests (including root path for index.html)
+        else:
+            # Let SimpleHTTPRequestHandler handle serving files like index.html, style.css, script.js
+            # It defaults to serving from the current working directory.
+            super().do_GET()
+
+    def handle_epub_request(self, query_string):
+        """Handles the /generate-epub request."""
+        # Use the main script's logger
+        logger = logging.getLogger()
+        logger.info(f"HTTP Server: Received EPUB request with query: {query_string}")
+        params = urllib.parse.parse_qs(query_string)
+
+        url = params.get('url', [None])[0]
+        start_chapter = params.get('start', ['1'])[0] # Default to '1'
+        end_chapter = params.get('end', [None])[0] # Default to None
+
+        # --- Basic Input Validation ---
+        if not url:
+            self.send_error(400, "Error: 'url' parameter is required.")
+            logger.error("HTTP Server Error: Missing 'url' parameter.")
+            return
+
+        try:
+            start_chapter_num = int(start_chapter)
+            if start_chapter_num < 1: start_chapter_num = 1
+        except (ValueError, TypeError):
+            self.send_error(400, "Error: 'start' parameter must be a positive integer.")
+            logger.error(f"HTTP Server Error: Invalid 'start' parameter: {start_chapter}")
+            return
+
+        end_chapter_num = None
+        if end_chapter is not None and end_chapter != '': # Check for empty string too
+            try:
+                end_chapter_num = int(end_chapter)
+                if end_chapter_num < start_chapter_num:
+                    self.send_error(400, "Error: 'end' chapter cannot be less than 'start' chapter.")
+                    logger.error(f"HTTP Server Error: 'end' chapter ({end_chapter}) less than 'start' ({start_chapter}).")
+                    return
+            except (ValueError, TypeError):
+                self.send_error(400, "Error: 'end' parameter must be an integer.")
+                logger.error(f"HTTP Server Error: Invalid 'end' parameter: {end_chapter}")
+                return
+
+        logger.info(f"HTTP Server Params: url='{url}', start={start_chapter_num}, end={end_chapter_num}")
+
+        # --- Call Core Logic ---
+        try:
+            site_config = get_site_config(url)
+            if not site_config:
+                raise ValueError(f"Unsupported website URL: {url}")
+
+            # Fetch pages (using the same helper as FCGI)
+            index_html, metadata_html, metadata_url, chapter_list_fetch_url = fetch_initial_pages_fcgi(url, site_config)
+            if not index_html or not metadata_html:
+                 raise ConnectionError("Failed to fetch necessary pages.")
+
+            book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config)
+            chapter_links = get_chapter_links(index_html, chapter_list_fetch_url or url, site_config)
+
+            # Filter chapters
+            chapter_links = filter_chapters_by_range(chapter_links, start_chapter_num, end_chapter_num)
+            if not chapter_links:
+                raise ValueError("No chapters found for the specified range.")
+
+            # Fetch content
+            chapters_content_data = fetch_chapters_content(chapter_links, site_config)
+            if not chapters_content_data:
+                 raise ValueError("Failed to fetch content for any chapters.")
+
+            # Create EPUB in memory
+            epub_content, epub_filename = create_epub(
+                book_title, book_author, book_description, chapters_content_data,
+                metadata_url, cover_url, output_directory=None, return_bytes=True
+            )
+
+            # --- Send Response ---
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/epub+zip')
+
+            # Generate ASCII fallback filename (replace non-ASCII with '_')
+            ascii_filename = ''.join(c if c.isascii() else '_' for c in epub_filename)
+            # Ensure it's not empty and ends with .epub
+            if not ascii_filename.strip('_'): ascii_filename = "book.epub"
+            if not ascii_filename.endswith('.epub'): ascii_filename = os.path.splitext(ascii_filename)[0] + ".epub"
+
+            # Encode the original filename using RFC 5987
+            encoded_filename = urllib.parse.quote(epub_filename)
+
+            # Set Content-Disposition with both filename (fallback) and filename* (preferred)
+            disposition = f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
+            self.send_header('Content-Disposition', disposition)
+
+            self.send_header('Content-Length', str(len(epub_content)))
+            self.end_headers()
+            self.wfile.write(epub_content)
+            logger.info(f"HTTP Server: Successfully sent EPUB: {epub_filename}")
+
+        except Exception as e:
+            logger.exception("HTTP Server Error during EPUB generation:")
+            # Send a more informative error message if possible
+            error_message = f"Error generating EPUB: {e}"
+            # Ensure error message is encodable
+            try:
+                error_bytes = error_message.encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(error_bytes)))
+                self.end_headers()
+                self.wfile.write(error_bytes)
+            except Exception as send_err:
+                 # Fallback if sending the detailed error fails
+                 logger.error(f"Failed to send detailed error response: {send_err}")
+                 self.send_error(500, "Internal server error during EPUB generation.")
+
+
+def run_dev_server(port):
+    """Starts the local development HTTP server."""
+    # Ensure directory exists for SimpleHTTPRequestHandler if needed (though not strictly necessary here)
+    # os.makedirs(os.path.dirname(__file__) or '.', exist_ok=True) # Ensure current dir exists
+
+    server_address = ('', port) # Listen on all interfaces
+    httpd = HTTPServer(server_address, EpubRequestHandler)
+    print(f"Starting local development server...")
+    print(f"Serving files from: {os.getcwd()}")
+    print(f"Open http://localhost:{port}/ or http://127.0.0.1:{port}/ in your browser.")
+    print("Press Ctrl+C to stop the server.")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+        httpd.server_close()
+    except OSError as e:
+        print(f"\nError starting server: {e}")
+        print(f"Perhaps port {port} is already in use?")
+
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -873,15 +1290,39 @@ if __name__ == "__main__":
     # import sys # Already imported at top
 
     parser = argparse.ArgumentParser(description='Download chapters from bqg5.com or 69shuba.com book index page and create an EPUB.')
-    # Changed default to None, make URL required, removed nargs='?'
-    parser.add_argument('url', help='The URL of the book index page (e.g., https://www.bqg5.com/0_521/ or https://www.69shuba.com/book/85122/)')
+    # Make URL optional initially, will check later if required for CLI mode
+    parser.add_argument('url', nargs='?', default=None, help='The URL of the book index page (Required for CLI mode, e.g., https://www.bqg5.com/0_521/)')
     parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number (inclusive, default: 1)')
     parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number (inclusive, default: last chapter)')
     parser.add_argument('-o', '--output-dir', default=None, help=f'Directory to save the EPUB file (default: {OUTPUT_DIR})')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging') # DEBUG argument
-    args = parser.parse_args()
+    parser.add_argument('--fcgi', action='store_true', help='Run in FCGI mode') # FCGI argument
+    parser.add_argument('--serve', action='store_true', help='Run a local development web server') # Add serve argument
+    parser.add_argument('--port', type=int, default=8000, help='Port for the development server (default: 8000)') # Add port argument
+    args = parser.parse_args() # Parse arguments here
 
-    # --- Configure Logging Level ---
+    # --- Validate Arguments Based on Mode ---
+    if not args.serve and not args.fcgi and args.url is None:
+        parser.error("the following arguments are required in CLI mode: url")
+
+    # --- Determine Execution Mode ---
+    if args.serve:
+        # --- Run Development Server ---
+        # Configure logging for the server
+        log_level = logging.DEBUG if args.debug else logging.INFO
+        # Use a distinct format for server logs
+        logging.basicConfig(level=log_level, format='%(asctime)s - Server - %(levelname)s - %(message)s')
+        run_dev_server(args.port)
+        sys.exit(0)
+    elif args.fcgi:
+        # --- Run FCGI Handler ---
+        # Logging is configured within handle_fcgi_request
+        handle_fcgi_request()
+        sys.exit(0)
+    else:
+        # --- Standard CLI Execution ---
+        log_level = logging.DEBUG if args.debug else logging.INFO
+        logging.basicConfig(level=log_level, format='%(asctime)s - CLI - %(levelname)s - %(message)s')
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.debug("Debug logging enabled.")
@@ -965,87 +1406,28 @@ if __name__ == "__main__":
         metadata_html = index_html # Use the same HTML for both
         metadata_url = book_index_url # URL where metadata was found
 
-    # --- Process Data ---
+    # --- Process Data (CLI Mode) ---
     if index_html and metadata_html:
-        # Use metadata_html for details, index_html for chapters
+        # Use metadata_html for details, index_html for chapters (metadata_url needed for cover resolution)
         # Pass metadata_url for resolving relative cover images if needed
         book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config)
 
-        chapter_links = get_chapter_links(index_html, book_index_url, site_config)
+        # Use chapter_list_fetch_url if available (for sites where metadata/chapters are separate)
+        chapter_list_source_url = chapter_list_fetch_url or book_index_url
+        chapter_links = get_chapter_links(index_html, chapter_list_source_url, site_config)
 
-        # --- Apply Chapter Range ---
-        start_chapter_num = args.start_chapter
-        end_chapter_num = args.end_chapter
-        original_chapter_count = len(chapter_links)
-
-        # Convert chapter numbers to 0-based list indices
-        start_index = start_chapter_num - 1
-        end_index = end_chapter_num if end_chapter_num is not None else original_chapter_count
-
-        # Validate indices
-        if start_index < 0:
-            logging.warning(f"Start chapter {start_chapter_num} is invalid. Using chapter 1.")
-            start_index = 0
-        if end_index > original_chapter_count:
-            logging.warning(f"End chapter {end_chapter_num} is greater than total chapters ({original_chapter_count}). Using last chapter.")
-            end_index = original_chapter_count
-        if start_index >= end_index:
-             logging.warning(f"Start chapter ({start_chapter_num}) is greater than or equal to end chapter ({end_chapter_num}). Only downloading chapter {start_chapter_num}.")
-             end_index = start_index + 1 # Ensure at least the start chapter is included
-
-        # Slice the chapter list
-        if start_index > 0 or end_index < original_chapter_count:
-             logging.info(f"Selecting chapters from {start_index + 1} to {end_index} (inclusive).")
-             chapter_links = chapter_links[start_index:end_index]
-        else:
-             logging.info(f"Selecting all {original_chapter_count} chapters.")
+        # Apply chapter range using helper
+        chapter_links = filter_chapters_by_range(chapter_links, args.start_chapter, args.end_chapter)
 
         if chapter_links:
-            chapters_content_data = []
-            total_chapters = len(chapter_links)
-            logging.info(f"Attempting to fetch content for {total_chapters} chapters...")
-
-            for i, chapter_info in enumerate(chapter_links):
-                logging.info(f"Processing chapter {i+1}/{total_chapters}: {chapter_info['title']} ({chapter_info['url']})")
-                chapter_html_page = fetch_url(chapter_info['url'])
-                if chapter_html_page:
-                    soup = BeautifulSoup(chapter_html_page, 'html.parser')
-                    # Find the main content div using selectors from config
-                    content_div = None
-                    content_selectors = site_config.get('chapter_content_selectors', {}).get('container', [])
-                    for selector_info in content_selectors:
-                         try:
-                             if isinstance(selector_info, tuple) and len(selector_info) == 2:
-                                  content_div = soup.find(selector_info[0], selector_info[1])
-                             elif isinstance(selector_info, str): # Simple CSS selector
-                                  content_div = soup.select_one(selector_info)
-                             if content_div:
-                                 logging.debug(f"Found content container using: {selector_info}")
-                                 break # Found it
-                         except Exception as e:
-                             logging.warning(f"Error applying content selector {selector_info}: {e}")
-                             continue # Try next selector
-
-                    if content_div:
-                        # Clean the content *container* before adding
-                        # Pass site_config to cleaning function for site-specific rules
-                        cleaned_content_html = clean_html_content(content_div, site_config) # Pass the tag object and config
-                        if cleaned_content_html: # Ensure content was actually extracted
-                            chapters_content_data.append({
-                                'title': chapter_info['title'],
-                                'content_html': cleaned_content_html
-                            })
-                        else:
-                            logging.warning(f"Content div found but no text extracted for chapter: {chapter_info['title']}")
-                    else:
-                        logging.warning(f"Could not find content div for chapter: {chapter_info['title']} at {chapter_info['url']} using selectors {content_selectors}")
-                else:
-                    logging.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
+            # Fetch chapter content using helper
+            chapters_content_data = fetch_chapters_content(chapter_links, site_config)
 
             if chapters_content_data:
                 logging.info(f"\nCollected content for {len(chapters_content_data)} chapters. Creating EPUB...")
-                # Pass the original book_index_url as the source URL for metadata and the output directory
-                create_epub(book_title, book_author, book_description, chapters_content_data, book_index_url, cover_url, args.output_dir)
+                # Pass the metadata_url as the source URL for metadata
+                # Pass args.output_dir for CLI mode
+                create_epub(book_title, book_author, book_description, chapters_content_data, metadata_url, cover_url, args.output_dir)
             else:
                 logging.error("No chapter content collected. EPUB creation aborted.")
         else:
