@@ -1120,12 +1120,6 @@ def fetch_chapters_content(chapter_links, site_config):
             logging.warning(f"Skipping chapter due to fetch error: {chapter_info['title']}")
     return chapters_content_data
 
-
-# --- Task Management (for Async Server) ---
-tasks = {} # Dictionary to store task status and results
-tasks_lock = threading.Lock() # Lock for thread-safe access to tasks dictionary
-TASK_TIMEOUT = timedelta(hours=1) # How long to keep task results
-
 # --- Local Development Server ---
 
 class EpubRequestHandler(SimpleHTTPRequestHandler):
