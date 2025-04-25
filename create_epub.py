@@ -1,3 +1,4 @@
+#!/home/gituser/miniconda3/envs/web/bin/python
 import requests
 from bs4 import BeautifulSoup
 import ebooklib
@@ -15,8 +16,8 @@ import tempfile # For temporary file creation
 from http.server import SimpleHTTPRequestHandler, HTTPServer # For dev server
 import urllib.parse # For parsing URL in dev server
 # --- Configuration ---
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging - Force output to stdout for CGI streaming
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 
 BASE_URL = "https://www.bqg5.com"
 # Default book, can be changed via command-line argument
@@ -891,7 +892,8 @@ import urllib.parse
 
 def handle_fcgi_request():
     """Handles incoming FCGI requests (parsing QUERY_STRING)."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - FCGI - %(levelname)s - %(message)s')
+    # Force output to stdout for CGI streaming
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - FCGI - %(levelname)s - %(message)s', stream=sys.stdout)
     logging.info("FCGI request received.")
 
     # Parse QUERY_STRING environment variable instead of using cgi.FieldStorage
@@ -1304,8 +1306,8 @@ if __name__ == "__main__":
         # --- Run Development Server ---
         # Configure logging for the server
         log_level = logging.DEBUG if args.debug else logging.INFO
-        # Use a distinct format for server logs
-        logging.basicConfig(level=log_level, format='%(asctime)s - Server - %(levelname)s - %(message)s')
+        # Use a distinct format for server logs (stdout is fine here too)
+        logging.basicConfig(level=log_level, format='%(asctime)s - Server - %(levelname)s - %(message)s', stream=sys.stdout)
         run_dev_server(args.port)
         sys.exit(0)
     elif args.fcgi:
@@ -1316,7 +1318,8 @@ if __name__ == "__main__":
     else:
         # --- Standard CLI Execution ---
         log_level = logging.DEBUG if args.debug else logging.INFO
-        logging.basicConfig(level=log_level, format='%(asctime)s - CLI - %(levelname)s - %(message)s')
+        # Force output to stdout for CGI streaming compatibility
+        logging.basicConfig(level=log_level, format='%(asctime)s - CLI - %(levelname)s - %(message)s', stream=sys.stdout)
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.debug("Debug logging enabled.")
@@ -1399,6 +1402,7 @@ if __name__ == "__main__":
         index_html = fetch_url(book_index_url)
         metadata_html = index_html # Use the same HTML for both
         metadata_url = book_index_url # URL where metadata was found
+        chapter_list_fetch_url = book_index_url # Chapters are fetched from the same URL
 
     # --- Process Data (CLI Mode) ---
     if index_html and metadata_html:
