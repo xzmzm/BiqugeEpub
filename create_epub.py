@@ -31,7 +31,7 @@ HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
     'Referer': BASE_URL, # Add Referer header
 }
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 # --- Site Configuration ---
 SITE_CONFIGS = {
@@ -688,21 +688,32 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
     cover_image_content = None
     cover_item = None
     if cover_image_url:
-        logging.info(f"Attempting to download cover image: {cover_image_url}")
-        try:
-            img_response = requests.get(cover_image_url, headers=HEADERS, timeout=30, stream=True)
-            img_response.raise_for_status()
-            cover_image_content = img_response.content
-            # Guess image type from URL or fallback
-            img_mimetype, _ = mimetypes.guess_type(cover_image_url)
-            if not img_mimetype:
-                img_mimetype = 'image/jpeg' # Default fallback
-            cover_item = epub.EpubItem(uid='cover_image', file_name=f'cover.{mimetypes.guess_extension(img_mimetype) or ".jpg"}', media_type=img_mimetype, content=cover_image_content)
-            book.add_item(cover_item)
-            book.set_cover(cover_item.file_name, cover_image_content) # Use set_cover for better compatibility
-            logging.info(f"Cover image downloaded and added ({img_mimetype}).")
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not download or add cover image: {e}")
+        retries = 0
+        while retries < MAX_RETRIES:
+            logging.info(f"Attempting to download cover image: {cover_image_url} (Attempt {retries + 1}/{MAX_RETRIES})")
+            try:
+                img_response = requests.get(cover_image_url, headers=HEADERS, timeout=30, stream=True)
+                img_response.raise_for_status()
+                cover_image_content = img_response.content
+                # Guess image type from URL or fallback
+                img_mimetype, _ = mimetypes.guess_type(cover_image_url)
+                if not img_mimetype:
+                    img_mimetype = 'image/jpeg' # Default fallback
+                cover_filename = f'cover{mimetypes.guess_extension(img_mimetype) or ".jpg"}' # Fix double dot
+                # set_cover adds the item automatically, no need for book.add_item(cover_item)
+                book.set_cover(cover_filename, cover_image_content, create_page=True)
+                logging.info(f"Cover image downloaded and added ({img_mimetype}).")
+                break # Success, exit retry loop
+            except requests.exceptions.Timeout:
+                retries += 1
+                logging.warning(f"Timeout downloading cover image. Retrying ({retries}/{MAX_RETRIES})...")
+                time.sleep(2 ** retries) # Exponential backoff
+            except requests.exceptions.RequestException as e:
+                retries += 1
+                logging.warning(f"Error downloading cover image: {e}. Retrying ({retries}/{MAX_RETRIES})...")
+                time.sleep(2 ** retries) # Exponential backoff
+        if retries == MAX_RETRIES:
+            logging.error(f"Failed to download cover image after {MAX_RETRIES} retries.")
 
     # Create chapters and add to book
     epub_chapters = []
