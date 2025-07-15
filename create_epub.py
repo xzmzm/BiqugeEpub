@@ -610,6 +610,7 @@ def get_chapter_links(index_html, book_url, site_config):
                 if re.search(r'/\d+/\d+(?:\.html)?$', path) or \
                    re.search(r'/txt/\d+/\d+', path) or \
                    re.search(r'/read/\d+/\d+', path) or \
+                   re.search(r'/read/\d+_\d+\.html$', path) or \
                    re.search(r'/\d+_\d+/\d+\.html$', path): # Added this pattern
                     is_likely_chapter = True
             except Exception:
