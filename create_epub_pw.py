@@ -15,7 +15,7 @@ import requests
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # --- Global Playwright Instance ---
 PLAYWRIGHT_INSTANCE = None
@@ -27,7 +27,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 OUTPUT_DIR = "output_epubs"
 OUTPUT_FILENAME_TEMPLATE = "{title}.epub"
 REQUEST_DELAY = 0.2
-MAX_RETRIES = 3
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 # Headers for the requests call to download the cover image
 REQUESTS_HEADERS = { 'User-Agent': USER_AGENT }
@@ -40,6 +39,7 @@ SITE_CONFIGS = {
         "encoding": "gbk",
         "metadata_url_template": "{base_url}/book/{book_id}.htm",
         "chapter_list_url_template": "{base_url}/book/{book_id}/",
+        # Selectors for finding data on the page
         "metadata_selectors": {
             "title_meta": ('meta', {'property': 'og:title'}),
             "author_meta": ('meta', {'property': 'og:novel:author'}),
@@ -54,8 +54,12 @@ SITE_CONFIGS = {
             "link_selector": 'li a',
         },
         "chapter_content_selectors": {
-            "container": [('div', {'class': 'txtnav'})],
+            "container": "div.mybox > div.txtnav",
         },
+        # Selectors to wait for to ensure the page (and not a Cloudflare page) has loaded
+        "metadata_wait_selector": "div.booknav2",
+        "chapter_list_wait_selector": "div.catalog#catalog",
+        "chapter_content_wait_selector": "div.mybox > div.txtnav",
         "ads_patterns": [
             r'www\.69shuba\.com', r'69书吧', r'https://www\.69shuba\.com',
             r'小提示：.*', r'章节错误？点此举报', r'Copyright \d+ 69书吧'
@@ -65,12 +69,32 @@ SITE_CONFIGS = {
 
 # --- Core Logic ---
 
+def _generate_safe_filename_from_url(url, prefix=""):
+    """Generates a safe and readable filename from a URL for debugging."""
+    parsed_url = urllib.parse.urlparse(url)
+    path_segment = os.path.basename(parsed_url.path) or "index"
+    safe_segment = re.sub(r'[^a-zA-Z0-9_\-.]', '_', path_segment)
+    if not os.path.splitext(safe_segment)[1]: safe_segment += ".html"
+    return f"{prefix}{safe_segment}"
+
+def save_debug_html(directory, url, content, prefix=""):
+    """Saves HTML content to a file in the specified directory for debugging."""
+    if not directory: return
+    try:
+        filename = _generate_safe_filename_from_url(url, prefix)
+        os.makedirs(directory, exist_ok=True)
+        filepath = os.path.join(directory, filename)
+        with open(filepath, 'w', encoding='utf-8') as f: f.write(content)
+        logging.debug(f"Saved debug HTML to {filepath}")
+    except Exception as e:
+        logging.warning(f"Could not save debug HTML file for {url}: {e}")
+
 def initialize_browser():
     global PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     if BROWSER_INSTANCE is None:
         logging.info("Initializing Playwright browser...")
         PLAYWRIGHT_INSTANCE = sync_playwright().start()
-        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=True)
+        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=False)
 
 def close_browser():
     global PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
@@ -81,26 +105,79 @@ def close_browser():
         BROWSER_INSTANCE = None
         PLAYWRIGHT_INSTANCE = None
 
-def fetch_page_with_playwright(url, context, logger=None):
+def fetch_page_with_playwright(url, context, wait_for_selector_str, logger=None, debug_dir=None, debug_prefix=""):
+    """
+    Fetches a page, attempting a quick pass with checkbox interaction, then falling back to a new tab bypass.
+    """
     if logger is None: logger = logging.getLogger()
-    initialize_browser()
     page = None
+    
+    # --- Primary Attempt (Fast Timeout) ---
     try:
-        logger.info(f"Fetching: {url}")
+        logger.info(f"Navigating to: {url}")
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_selector("body", timeout=15000)
-        content = page.content()
-        logger.debug(f"Successfully fetched content for {url}")
+
+        start_time = time.time()
+        total_timeout = 15  # Reduced timeout for the primary attempt
+
+        while time.time() - start_time < total_timeout:
+            if page.locator(wait_for_selector_str).is_visible():
+                logger.info(f"Success on primary attempt for selector '{wait_for_selector_str}'.")
+                content = page.content()
+                save_debug_html(debug_dir, url, content, prefix=debug_prefix)
+                page.close()
+                return content
+            
+            # --- NEW: More specific iframe selector for Turnstile ---
+            frame_locator = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+            checkbox = frame_locator.locator('input[type="checkbox"]') # More specific target within the frame
+            
+            if checkbox.is_visible():
+                logger.info("Cloudflare Turnstile checkbox is visible. Clicking now.")
+                checkbox.click()
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                start_time = time.time() # Reset timer after action
+                continue
+
+            time.sleep(1)
+
+        raise PlaywrightTimeoutError(f"Primary attempt timed out after {total_timeout}s.")
+
+    except Exception as e:
+        logger.warning(f"Primary fetch attempt failed for {url}: {e}")
+        if page:
+            page.screenshot(path=f"playwright_primary_fail_{urllib.parse.quote_plus(url)}.png")
+            save_debug_html(debug_dir, url, page.content(), prefix=f"FAIL_{debug_prefix}")
+        
+    finally:
+        if page and not page.is_closed():
+            page.close()
+
+    # --- Bypass Strategy: New Tab ---
+    logger.info(f"Attempting bypass strategy for {url} by opening a new tab.")
+    bypass_page = None
+    try:
+        bypass_page = context.new_page()
+        bypass_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        
+        # Give the bypass page a generous amount of time to load the content directly
+        bypass_page.wait_for_selector(wait_for_selector_str, timeout=45000)
+        
+        logger.info(f"Bypass successful! Found selector '{wait_for_selector_str}' in new tab.")
+        content = bypass_page.content()
+        save_debug_html(debug_dir, url, content, prefix=f"BYPASS_SUCCESS_{debug_prefix}")
         return content
     except Exception as e:
-        logger.warning(f"Playwright fetch failed for {url}: {e}")
-        if page:
-            page.screenshot(path=f"playwright_error_{urllib.parse.quote_plus(url)}.png")
+        logger.error(f"FATAL: Bypass strategy also failed for {url}: {e}")
+        if bypass_page:
+            bypass_page.screenshot(path=f"playwright_bypass_fail_{urllib.parse.quote_plus(url)}.png")
+            save_debug_html(debug_dir, bypass_page.content(), prefix=f"BYPASS_FAIL_{debug_prefix}")
         return None
     finally:
-        if page:
-            page.close()
+        if bypass_page and not bypass_page.is_closed():
+            bypass_page.close()
+
 
 def get_site_config(url, logger=None):
     if logger is None: logger = logging.getLogger()
@@ -202,9 +279,6 @@ def get_chapter_links(html_content, site_config):
     return unique_chapters
 
 def create_epub(title, author, description, chapters_data, book_url, cover_image_url, output_directory, logger=None):
-    """
-    Creates an EPUB file from the chapter data.
-    """
     if logger is None: logger = logging.getLogger()
     book = epub.EpubBook()
     book.set_identifier(f'urn:uuid:{re.sub(r"[^w-]+", "-", book_url)}')
@@ -213,8 +287,6 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
     book.add_author(author)
     book.add_metadata('DC', 'description', description)
     book.add_metadata('DC', 'source', book_url)
-
-    # --- Add Cover Image using requests ---
     if cover_image_url:
         try:
             logger.info(f"Downloading cover image: {cover_image_url}")
@@ -227,14 +299,10 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
             logger.info("Cover image added.")
         except requests.exceptions.RequestException as e:
             logger.warning(f"Failed to download cover image: {e}")
-
-    # --- Create Title Page ---
     title_page_content = f'<h1>{title}</h1><h2>{author}</h2><hr/><p>{description.replace("n", "<br/>")}</p>'
     title_page = epub.EpubHtml(title='Title Page', file_name='title_page.xhtml', lang='zh')
     title_page.content = title_page_content
     book.add_item(title_page)
-
-    # --- Create Chapters ---
     epub_chapters = []
     for i, chapter_info in enumerate(chapters_data):
         chapter_title = chapter_info['title']
@@ -243,8 +311,6 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
         epub_chapter.content = f'<h1>{chapter_title}</h1>{chapter_info["content_html"]}'
         book.add_item(epub_chapter)
         epub_chapters.append(epub_chapter)
-
-    # --- Define CSS Style ---
     style = '''
     body { font-family: sans-serif; line-height: 1.6; margin: 1em; }
     h1 { text-align: center; margin-top: 2em; margin-bottom: 1em; font-size: 1.5em; font-weight: bold; page-break-before: always; }
@@ -252,14 +318,10 @@ def create_epub(title, author, description, chapters_data, book_url, cover_image
     '''
     css_item = epub.EpubItem(uid="style_css", file_name="style/style.css", media_type="text/css", content=style)
     book.add_item(css_item)
-
-    # --- Build Book ---
     book.toc = (epub.Link('title_page.xhtml', 'Title Page', 'titlepage'), *epub_chapters)
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     book.spine = ['nav', title_page, *epub_chapters]
-    
-    # Sanitize filename
     sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title).strip()
     output_filename = OUTPUT_FILENAME_TEMPLATE.format(title=sanitized_title or "Untitled_Book")
     os.makedirs(output_directory, exist_ok=True)
@@ -273,12 +335,16 @@ def main():
     parser.add_argument('-s', '--start-chapter', type=int, default=1, help='Starting chapter number')
     parser.add_argument('-e', '--end-chapter', type=int, default=None, help='Ending chapter number')
     parser.add_argument('-o', '--output-dir', default=OUTPUT_DIR, help='Directory to save the EPUB file')
+    parser.add_argument('--debug-html-dir', help='(Optional) Directory to save fetched HTML files for debugging.')
     args = parser.parse_args()
+
+    if args.debug_html_dir:
+        logging.info(f"Debug mode enabled. HTML files will be saved to: '{args.debug_html_dir}'")
+        os.makedirs(args.debug_html_dir, exist_ok=True)
 
     book_url = args.url.strip().rstrip('/')
     site_config = get_site_config(book_url)
-    if not site_config:
-        return
+    if not site_config: return
 
     context = None
     try:
@@ -297,22 +363,20 @@ def main():
         metadata_url = site_config['metadata_url_template'].format(base_url=base_url, book_id=book_id)
         chapter_list_url = site_config['chapter_list_url_template'].format(base_url=base_url, book_id=book_id)
 
-        logging.info("Performing initial fetch to solve Cloudflare challenge...")
-        page = context.new_page()
-        page.goto(metadata_url, wait_until="domcontentloaded", timeout=60000)
-        try:
-            frame = page.frame_locator('iframe[title*="Cloudflare"]')
-            frame.get_by_role("checkbox").click(timeout=10000)
-            logging.info("Cloudflare checkbox clicked.")
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-        except TimeoutError:
-            logging.info("No visible Cloudflare checkbox, or it was passed automatically.")
-        
-        metadata_html = page.content()
-        page.close()
+        metadata_html = fetch_page_with_playwright(
+            metadata_url, context,
+            wait_for_selector_str=site_config['metadata_wait_selector'],
+            debug_dir=args.debug_html_dir,
+            debug_prefix="00_metadata_page_"
+        )
         if not metadata_html: return
 
-        chapter_list_html = fetch_page_with_playwright(chapter_list_url, context)
+        chapter_list_html = fetch_page_with_playwright(
+            chapter_list_url, context,
+            wait_for_selector_str=site_config['chapter_list_wait_selector'],
+            debug_dir=args.debug_html_dir,
+            debug_prefix="01_chapter_list_page_"
+        )
         if not chapter_list_html: return
         
         book_title, book_author, book_description, cover_url = get_book_details(metadata_html, metadata_url, site_config)
@@ -327,19 +391,32 @@ def main():
             return
 
         chapters_content_data = []
-        total_to_fetch = len(chapters_to_fetch)
+        content_selector_str = site_config.get('chapter_content_selectors', {}).get('container')
+
         for i, chapter_info in enumerate(chapters_to_fetch):
-            logging.info(f"Fetching chapter {start_index + i + 1}/{len(all_chapters)}: {chapter_info['title']}")
-            chapter_html = fetch_page_with_playwright(chapter_info['url'], context)
+            logging.info(f"--- Processing chapter {start_index + i + 1}/{len(all_chapters)}: {chapter_info['title']} ---")
+            debug_prefix = f"chap_{start_index + i + 1:04d}_"
+            
+            chapter_html = fetch_page_with_playwright(
+                chapter_info['url'], context,
+                wait_for_selector_str=site_config['chapter_content_wait_selector'],
+                debug_dir=args.debug_html_dir,
+                debug_prefix=debug_prefix
+            )
+            
             if chapter_html:
                 soup = BeautifulSoup(chapter_html, 'html.parser', from_encoding=site_config.get('encoding'))
-                content_selector = site_config['chapter_content_selectors']['container'][0]
-                content_div = soup.select_one(f"{content_selector[0]}.{content_selector[1]['class']}")
+                content_div = soup.select_one(content_selector_str) if content_selector_str else None
                 if content_div:
                     cleaned_content = clean_html_content(content_div, site_config)
                     chapters_content_data.append({'title': chapter_info['title'], 'content_html': cleaned_content})
                 else:
-                    logging.warning(f"Could not find content container for: {chapter_info['title']}")
+                    logging.error(f"FATAL: Fetched HTML but could not find content for '{chapter_info['title']}'. Aborting.")
+                    return
+            else:
+                logging.error(f"FATAL: Failed to fetch page for '{chapter_info['title']}'. Aborting.")
+                return 
+
             time.sleep(REQUEST_DELAY)
 
         if chapters_content_data:
@@ -348,8 +425,7 @@ def main():
             logging.error("Failed to fetch content for any chapters. EPUB not created.")
 
     finally:
-        if context:
-            context.close()
+        if context: context.close()
         close_browser()
 
 if __name__ == "__main__":
