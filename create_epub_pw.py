@@ -167,7 +167,7 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
         logger.error(f"FATAL: Bypass strategy also failed for {url}: {e}")
         if bypass_page:
             bypass_page.screenshot(path=f"playwright_bypass_fail_{urllib.parse.quote_plus(url)}.png")
-            save_debug_html(debug_dir, bypass_page.content(), encoding, prefix=f"BYPASS_FAIL_{debug_prefix}")
+            save_debug_html(debug_dir, url, bypass_page.content(), encoding, prefix=f"BYPASS_FAIL_{debug_prefix}")
         return None
     finally:
         if bypass_page and not bypass_page.is_closed():
