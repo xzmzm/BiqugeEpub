@@ -39,7 +39,6 @@ SITE_CONFIGS = {
         "encoding": "gbk",
         "metadata_url_template": "{base_url}/book/{book_id}.htm",
         "chapter_list_url_template": "{base_url}/book/{book_id}/",
-        # Selectors for finding data on the page
         "metadata_selectors": {
             "title_meta": ('meta', {'property': 'og:title'}),
             "author_meta": ('meta', {'property': 'og:novel:author'}),
@@ -56,7 +55,6 @@ SITE_CONFIGS = {
         "chapter_content_selectors": {
             "container": "div.mybox > div.txtnav",
         },
-        # Selectors to wait for to ensure the page (and not a Cloudflare page) has loaded
         "metadata_wait_selector": "div.booknav2",
         "chapter_list_wait_selector": "div.catalog#catalog",
         "chapter_content_wait_selector": "div.mybox > div.txtnav",
@@ -70,31 +68,33 @@ SITE_CONFIGS = {
 # --- Core Logic ---
 
 def _generate_safe_filename_from_url(url, prefix=""):
-    """Generates a safe and readable filename from a URL for debugging."""
     parsed_url = urllib.parse.urlparse(url)
     path_segment = os.path.basename(parsed_url.path) or "index"
     safe_segment = re.sub(r'[^a-zA-Z0-9_\-.]', '_', path_segment)
     if not os.path.splitext(safe_segment)[1]: safe_segment += ".html"
     return f"{prefix}{safe_segment}"
 
-def save_debug_html(directory, url, content, prefix=""):
-    """Saves HTML content to a file in the specified directory for debugging."""
+def save_debug_html(directory, url, content, encoding, prefix=""):
+    """Saves the raw byte stream of the HTML content to a file."""
     if not directory: return
     try:
         filename = _generate_safe_filename_from_url(url, prefix)
         os.makedirs(directory, exist_ok=True)
         filepath = os.path.join(directory, filename)
-        with open(filepath, 'w', encoding='utf-8') as f: f.write(content)
-        logging.debug(f"Saved debug HTML to {filepath}")
+        # Open in binary write mode ('wb') and write the encoded bytes
+        with open(filepath, 'wb') as f:
+            # Re-encode the string from page.content() back to its original bytes
+            f.write(content.encode(encoding, errors='ignore'))
+        logging.debug(f"Saved raw byte stream to {filepath}")
     except Exception as e:
-        logging.warning(f"Could not save debug HTML file for {url}: {e}")
+        logging.warning(f"Could not save debug byte stream for {url}: {e}")
 
 def initialize_browser():
     global PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
     if BROWSER_INSTANCE is None:
         logging.info("Initializing Playwright browser...")
         PLAYWRIGHT_INSTANCE = sync_playwright().start()
-        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=False)
+        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=True)
 
 def close_browser():
     global PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
@@ -105,10 +105,7 @@ def close_browser():
         BROWSER_INSTANCE = None
         PLAYWRIGHT_INSTANCE = None
 
-def fetch_page_with_playwright(url, context, wait_for_selector_str, logger=None, debug_dir=None, debug_prefix=""):
-    """
-    Fetches a page, attempting a quick pass with checkbox interaction, then falling back to a new tab bypass.
-    """
+def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, logger=None, debug_dir=None, debug_prefix=""):
     if logger is None: logger = logging.getLogger()
     page = None
     
@@ -119,25 +116,24 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, logger=None,
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         start_time = time.time()
-        total_timeout = 15  # Reduced timeout for the primary attempt
+        total_timeout = 5
 
         while time.time() - start_time < total_timeout:
             if page.locator(wait_for_selector_str).is_visible():
                 logger.info(f"Success on primary attempt for selector '{wait_for_selector_str}'.")
                 content = page.content()
-                save_debug_html(debug_dir, url, content, prefix=debug_prefix)
+                save_debug_html(debug_dir, url, content, encoding, prefix=debug_prefix)
                 page.close()
                 return content
             
-            # --- NEW: More specific iframe selector for Turnstile ---
             frame_locator = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-            checkbox = frame_locator.locator('input[type="checkbox"]') # More specific target within the frame
+            checkbox = frame_locator.locator('input[type="checkbox"]')
             
             if checkbox.is_visible():
                 logger.info("Cloudflare Turnstile checkbox is visible. Clicking now.")
                 checkbox.click()
                 page.wait_for_load_state("domcontentloaded", timeout=20000)
-                start_time = time.time() # Reset timer after action
+                start_time = time.time()
                 continue
 
             time.sleep(1)
@@ -148,7 +144,7 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, logger=None,
         logger.warning(f"Primary fetch attempt failed for {url}: {e}")
         if page:
             page.screenshot(path=f"playwright_primary_fail_{urllib.parse.quote_plus(url)}.png")
-            save_debug_html(debug_dir, url, page.content(), prefix=f"FAIL_{debug_prefix}")
+            save_debug_html(debug_dir, url, page.content(), encoding, prefix=f"FAIL_{debug_prefix}")
         
     finally:
         if page and not page.is_closed():
@@ -161,18 +157,17 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, logger=None,
         bypass_page = context.new_page()
         bypass_page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Give the bypass page a generous amount of time to load the content directly
         bypass_page.wait_for_selector(wait_for_selector_str, timeout=45000)
         
         logger.info(f"Bypass successful! Found selector '{wait_for_selector_str}' in new tab.")
         content = bypass_page.content()
-        save_debug_html(debug_dir, url, content, prefix=f"BYPASS_SUCCESS_{debug_prefix}")
+        save_debug_html(debug_dir, url, content, encoding, prefix=f"BYPASS_SUCCESS_{debug_prefix}")
         return content
     except Exception as e:
         logger.error(f"FATAL: Bypass strategy also failed for {url}: {e}")
         if bypass_page:
             bypass_page.screenshot(path=f"playwright_bypass_fail_{urllib.parse.quote_plus(url)}.png")
-            save_debug_html(debug_dir, bypass_page.content(), prefix=f"BYPASS_FAIL_{debug_prefix}")
+            save_debug_html(debug_dir, bypass_page.content(), encoding, prefix=f"BYPASS_FAIL_{debug_prefix}")
         return None
     finally:
         if bypass_page and not bypass_page.is_closed():
@@ -366,6 +361,7 @@ def main():
         metadata_html = fetch_page_with_playwright(
             metadata_url, context,
             wait_for_selector_str=site_config['metadata_wait_selector'],
+            encoding=site_config['encoding'],
             debug_dir=args.debug_html_dir,
             debug_prefix="00_metadata_page_"
         )
@@ -374,6 +370,7 @@ def main():
         chapter_list_html = fetch_page_with_playwright(
             chapter_list_url, context,
             wait_for_selector_str=site_config['chapter_list_wait_selector'],
+            encoding=site_config['encoding'],
             debug_dir=args.debug_html_dir,
             debug_prefix="01_chapter_list_page_"
         )
@@ -400,6 +397,7 @@ def main():
             chapter_html = fetch_page_with_playwright(
                 chapter_info['url'], context,
                 wait_for_selector_str=site_config['chapter_content_wait_selector'],
+                encoding=site_config['encoding'],
                 debug_dir=args.debug_html_dir,
                 debug_prefix=debug_prefix
             )
