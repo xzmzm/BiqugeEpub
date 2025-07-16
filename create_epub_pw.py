@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import urllib.parse
 import argparse
+import random
 
 # Import requests specifically for downloading the cover image
 import requests
@@ -94,7 +95,7 @@ def initialize_browser():
     if BROWSER_INSTANCE is None:
         logging.info("Initializing Playwright browser...")
         PLAYWRIGHT_INSTANCE = sync_playwright().start()
-        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=True)
+        BROWSER_INSTANCE = PLAYWRIGHT_INSTANCE.chromium.launch(headless=False)
 
 def close_browser():
     global PLAYWRIGHT_INSTANCE, BROWSER_INSTANCE
@@ -105,74 +106,48 @@ def close_browser():
         BROWSER_INSTANCE = None
         PLAYWRIGHT_INSTANCE = None
 
+CLICK_COORDS = {'x': 215, 'y': 290}
+
 def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, logger=None, debug_dir=None, debug_prefix=""):
+    global CLICK_COORDS # We need to access and modify the global variable
     if logger is None: logger = logging.getLogger()
     page = None
-    
-    # --- Primary Attempt (Fast Timeout) ---
+
     try:
-        logger.info(f"Navigating to: {url}")
         page = context.new_page()
+        page.set_viewport_size({"width": 1280, "height": 800}) # Consistent window size
+        logger.info(f"Navigating to: {url}")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        start_time = time.time()
-        total_timeout = 5
+        # Try to find final content directly
+        try:
+            page.wait_for_selector(wait_for_selector_str, state="visible", timeout=5000) # Short timeout
+            logger.info("Success! Content found directly.")
+            return page.content()
+        except PlaywrightTimeoutError:
+            logger.warning("Content not found. Assuming Cloudflare challenge is active.")
+            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_challenge_page.png"))
 
-        while time.time() - start_time < total_timeout:
-            if page.locator(wait_for_selector_str).is_visible():
-                logger.info(f"Success on primary attempt for selector '{wait_for_selector_str}'.")
-                content = page.content()
-                save_debug_html(debug_dir, url, content, encoding, prefix=debug_prefix)
-                page.close()
-                return content
+            coords = CLICK_COORDS
+            logger.info(f"Using cached coordinates to click: {coords}")
             
-            frame_locator = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-            checkbox = frame_locator.locator('input[type="checkbox"]')
+            # Use the captured or cached coordinates to perform the click
+            page.mouse.click(coords['x'], coords['y'])
+
+            logger.info("Click performed at specified coordinates. Waiting for page to solve...")
+            page.wait_for_selector(wait_for_selector_str, state="visible", timeout=60000)
             
-            if checkbox.is_visible():
-                logger.info("Cloudflare Turnstile checkbox is visible. Clicking now.")
-                checkbox.click()
-                page.wait_for_load_state("domcontentloaded", timeout=20000)
-                start_time = time.time()
-                continue
+            logger.info("Challenge solved successfully!")
+            return page.content()
 
-            time.sleep(1)
+        except Exception as e:
+            logger.error(f"FATAL: Failed during the coordinate-click process: {e}", exc_info=True)
+            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_COORD_FAIL.png"))
+            return None
 
-        raise PlaywrightTimeoutError(f"Primary attempt timed out after {total_timeout}s.")
-
-    except Exception as e:
-        logger.warning(f"Primary fetch attempt failed for {url}: {e}")
-        if page:
-            page.screenshot(path=f"playwright_primary_fail_{urllib.parse.quote_plus(url)}.png")
-            save_debug_html(debug_dir, url, page.content(), encoding, prefix=f"FAIL_{debug_prefix}")
-        
     finally:
         if page and not page.is_closed():
             page.close()
-
-    # --- Bypass Strategy: New Tab ---
-    logger.info(f"Attempting bypass strategy for {url} by opening a new tab.")
-    bypass_page = None
-    try:
-        bypass_page = context.new_page()
-        bypass_page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        
-        bypass_page.wait_for_selector(wait_for_selector_str, timeout=45000)
-        
-        logger.info(f"Bypass successful! Found selector '{wait_for_selector_str}' in new tab.")
-        content = bypass_page.content()
-        save_debug_html(debug_dir, url, content, encoding, prefix=f"BYPASS_SUCCESS_{debug_prefix}")
-        return content
-    except Exception as e:
-        logger.error(f"FATAL: Bypass strategy also failed for {url}: {e}")
-        if bypass_page:
-            bypass_page.screenshot(path=f"playwright_bypass_fail_{urllib.parse.quote_plus(url)}.png")
-            save_debug_html(debug_dir, url, bypass_page.content(), encoding, prefix=f"BYPASS_FAIL_{debug_prefix}")
-        return None
-    finally:
-        if bypass_page and not bypass_page.is_closed():
-            bypass_page.close()
-
 
 def get_site_config(url, logger=None):
     if logger is None: logger = logging.getLogger()
