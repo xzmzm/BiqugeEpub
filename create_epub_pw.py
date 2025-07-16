@@ -108,6 +108,39 @@ def close_browser():
 
 CLICK_COORDS = {'x': 215, 'y': 290}
 
+def human_like_mouse_move_and_click(page, x, y, logger=None):
+    """Simulate human-like mouse movement and clicking behavior"""
+    if logger is None: logger = logging.getLogger()
+    
+    # Add small random variations to coordinates (±5 pixels)
+    actual_x = x + random.randint(-5, 5)
+    actual_y = y + random.randint(-5, 5)
+    
+    logger.info(f"Moving mouse to ({actual_x}, {actual_y}) with human-like behavior")
+    
+    # Move mouse to target with slight curve
+    # First move to a point slightly off target
+    intermediate_x = actual_x + random.randint(-20, 20)
+    intermediate_y = actual_y + random.randint(-20, 20)
+    
+    # Move to intermediate point first
+    page.mouse.move(intermediate_x, intermediate_y)
+    time.sleep(random.uniform(0.1, 0.3))
+    
+    # Then move to actual target
+    page.mouse.move(actual_x, actual_y)
+    time.sleep(random.uniform(0.1, 0.2))
+    
+    # Add a small pause before clicking (human hesitation)
+    time.sleep(random.uniform(0.2, 0.5))
+    
+    # Perform the click with random timing
+    page.mouse.down()
+    time.sleep(random.uniform(0.05, 0.15))  # Hold click for realistic duration
+    page.mouse.up()
+    
+    logger.info(f"Human-like click completed at ({actual_x}, {actual_y})")
+
 def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, logger=None, debug_dir=None, debug_prefix=""):
     global CLICK_COORDS # We need to access and modify the global variable
     if logger is None: logger = logging.getLogger()
@@ -129,12 +162,15 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
             page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_challenge_page.png"))
 
             coords = CLICK_COORDS
-            logger.info(f"Using cached coordinates to click: {coords}")
+            logger.info(f"Using base coordinates: {coords}")
             
-            # Use the captured or cached coordinates to perform the click
-            page.mouse.click(coords['x'], coords['y'])
+            # Add random delay before attempting click (human behavior)
+            time.sleep(random.uniform(1.0, 3.0))
+            
+            # Use human-like mouse movement and clicking
+            human_like_mouse_move_and_click(page, coords['x'], coords['y'], logger)
 
-            logger.info("Click performed at specified coordinates. Waiting for page to solve...")
+            logger.info("Human-like click performed. Waiting for page to solve...")
             page.wait_for_selector(wait_for_selector_str, state="visible", timeout=60000)
             
             logger.info("Challenge solved successfully!")
