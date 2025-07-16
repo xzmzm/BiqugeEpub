@@ -141,11 +141,45 @@ def human_like_mouse_move_and_click(page, x, y, logger=None):
     
     logger.info(f"Human-like click completed at ({actual_x}, {actual_y})")
 
+def try_new_tab_bypass(context, url, wait_for_selector_str, logger, debug_dir, debug_prefix):
+    """Try opening the URL in a new tab to bypass Cloudflare challenge"""
+    logger.info("Trying new tab bypass strategy...")
+    new_page = None
+    
+    try:
+        new_page = context.new_page()
+        new_page.set_viewport_size({"width": 1280, "height": 800})
+        
+        # Add a small delay to simulate human behavior
+        time.sleep(random.uniform(1.0, 2.0))
+        
+        logger.info(f"Opening new tab for: {url}")
+        new_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        
+        # Check if content loads directly in new tab
+        try:
+            new_page.wait_for_selector(wait_for_selector_str, state="visible", timeout=8000)
+            logger.info("SUCCESS! New tab bypass worked - content loaded directly!")
+            new_page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_NEW_TAB_SUCCESS.png"))
+            return new_page.content()
+        except PlaywrightTimeoutError:
+            logger.info("New tab still shows challenge page")
+            new_page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_NEW_TAB_CHALLENGE.png"))
+            return None
+            
+    except Exception as e:
+        logger.warning(f"New tab bypass failed: {e}")
+        return None
+    finally:
+        if new_page and not new_page.is_closed():
+            new_page.close()
+
 def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, logger=None, debug_dir=None, debug_prefix=""):
     global CLICK_COORDS # We need to access and modify the global variable
     if logger is None: logger = logging.getLogger()
     page = None
     max_retries = 3  # Maximum number of challenge attempts
+    max_new_tab_attempts = 2  # Try new tab strategy up to 2 times
 
     try:
         page = context.new_page()
@@ -159,11 +193,26 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
             logger.info("Success! Content found directly.")
             return page.content()
         except PlaywrightTimeoutError:
-            logger.warning("Content not found. Assuming Cloudflare challenge is active.")
+            logger.warning("Content not found. Cloudflare challenge detected.")
+            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_initial_challenge.png"))
             
-            # Retry loop for multiple challenge attempts
+            # STRATEGY 1: Try new tab bypass first (often works!)
+            for tab_attempt in range(1, max_new_tab_attempts + 1):
+                logger.info(f"=== NEW TAB BYPASS ATTEMPT {tab_attempt}/{max_new_tab_attempts} ===")
+                result = try_new_tab_bypass(context, url, wait_for_selector_str, logger, debug_dir, f"{debug_prefix}_tab_{tab_attempt}")
+                if result:
+                    logger.info("New tab bypass successful! Returning content.")
+                    return result
+                
+                if tab_attempt < max_new_tab_attempts:
+                    logger.info("New tab attempt failed, waiting before next try...")
+                    time.sleep(random.uniform(2.0, 4.0))
+            
+            logger.info("=== NEW TAB BYPASS FAILED - FALLING BACK TO CHALLENGE SOLVING ===")
+            
+            # STRATEGY 2: Fall back to challenge solving on original page
             for attempt in range(1, max_retries + 1):
-                logger.info(f"Challenge attempt {attempt}/{max_retries}")
+                logger.info(f"Challenge solving attempt {attempt}/{max_retries}")
                 page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_challenge_attempt_{attempt}.png"))
 
                 coords = CLICK_COORDS
@@ -183,7 +232,7 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
                     logger.info(f"Challenge solved successfully on attempt {attempt}!")
                     return page.content()
                 except PlaywrightTimeoutError:
-                    logger.warning(f"Attempt {attempt} failed - challenge page may have reappeared")
+                    logger.warning(f"Challenge attempt {attempt} failed - page may have reappeared")
                     
                     # Check if we're still on a challenge page
                     current_url = page.url
@@ -195,7 +244,14 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
                             time.sleep(random.uniform(2.0, 4.0))
                             continue
                         else:
-                            logger.error("Max challenge attempts reached. Challenge failed.")
+                            logger.error("Max challenge attempts reached. Trying one final new tab attempt...")
+                            # Final desperate attempt with new tab
+                            final_result = try_new_tab_bypass(context, url, wait_for_selector_str, logger, debug_dir, f"{debug_prefix}_final_tab")
+                            if final_result:
+                                logger.info("Final new tab attempt succeeded!")
+                                return final_result
+                            
+                            logger.error("All strategies failed. Challenge failed.")
                             page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_FINAL_CHALLENGE_FAIL.png"))
                             return None
                     else:
@@ -211,8 +267,8 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
                             return None
 
         except Exception as e:
-            logger.error(f"FATAL: Failed during the coordinate-click process: {e}", exc_info=True)
-            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_COORD_FAIL.png"))
+            logger.error(f"FATAL: Failed during the bypass/challenge process: {e}", exc_info=True)
+            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_FATAL_ERROR.png"))
             return None
 
     finally:
