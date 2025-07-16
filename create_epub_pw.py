@@ -145,6 +145,7 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
     global CLICK_COORDS # We need to access and modify the global variable
     if logger is None: logger = logging.getLogger()
     page = None
+    max_retries = 3  # Maximum number of challenge attempts
 
     try:
         page = context.new_page()
@@ -159,22 +160,55 @@ def fetch_page_with_playwright(url, context, wait_for_selector_str, encoding, lo
             return page.content()
         except PlaywrightTimeoutError:
             logger.warning("Content not found. Assuming Cloudflare challenge is active.")
-            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_challenge_page.png"))
+            
+            # Retry loop for multiple challenge attempts
+            for attempt in range(1, max_retries + 1):
+                logger.info(f"Challenge attempt {attempt}/{max_retries}")
+                page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_challenge_attempt_{attempt}.png"))
 
-            coords = CLICK_COORDS
-            logger.info(f"Using base coordinates: {coords}")
-            
-            # Add random delay before attempting click (human behavior)
-            time.sleep(random.uniform(1.0, 3.0))
-            
-            # Use human-like mouse movement and clicking
-            human_like_mouse_move_and_click(page, coords['x'], coords['y'], logger)
+                coords = CLICK_COORDS
+                logger.info(f"Using base coordinates: {coords}")
+                
+                # Add random delay before attempting click (human behavior)
+                time.sleep(random.uniform(1.0, 3.0))
+                
+                # Use human-like mouse movement and clicking
+                human_like_mouse_move_and_click(page, coords['x'], coords['y'], logger)
 
-            logger.info("Human-like click performed. Waiting for page to solve...")
-            page.wait_for_selector(wait_for_selector_str, state="visible", timeout=60000)
-            
-            logger.info("Challenge solved successfully!")
-            return page.content()
+                logger.info(f"Human-like click performed (attempt {attempt}). Waiting for page to solve...")
+                
+                try:
+                    # Wait for the target content to appear
+                    page.wait_for_selector(wait_for_selector_str, state="visible", timeout=30000)
+                    logger.info(f"Challenge solved successfully on attempt {attempt}!")
+                    return page.content()
+                except PlaywrightTimeoutError:
+                    logger.warning(f"Attempt {attempt} failed - challenge page may have reappeared")
+                    
+                    # Check if we're still on a challenge page
+                    current_url = page.url
+                    if "challenge" in current_url.lower() or page.locator("text=Checking your browser").count() > 0:
+                        logger.warning(f"Still on challenge page after attempt {attempt}")
+                        if attempt < max_retries:
+                            logger.info(f"Will retry challenge (attempt {attempt + 1}/{max_retries})")
+                            # Add extra delay between retries
+                            time.sleep(random.uniform(2.0, 4.0))
+                            continue
+                        else:
+                            logger.error("Max challenge attempts reached. Challenge failed.")
+                            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_FINAL_CHALLENGE_FAIL.png"))
+                            return None
+                    else:
+                        # We're not on challenge page but still don't have content
+                        logger.warning(f"Not on challenge page but content selector not found on attempt {attempt}")
+                        if attempt < max_retries:
+                            logger.info("Will retry...")
+                            time.sleep(random.uniform(1.0, 2.0))
+                            continue
+                        else:
+                            logger.error("Max attempts reached. Content not found.")
+                            page.screenshot(path=os.path.join(debug_dir or ".", f"{debug_prefix}_CONTENT_NOT_FOUND.png"))
+                            return None
 
         except Exception as e:
             logger.error(f"FATAL: Failed during the coordinate-click process: {e}", exc_info=True)
